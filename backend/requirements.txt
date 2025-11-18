@@ -1,0 +1,59 @@
+# Django and DRF
+Django==5.0.1
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.3.1
+django-filter==24.1
+
+# Database
+psycopg2-binary==2.9.9
+dj-database-url==2.1.0
+
+# Celery and task scheduling
+celery==5.3.6
+redis==5.0.1
+django-celery-beat==2.5.0
+django-celery-results==2.5.1
+
+# Web scraping
+crawl4ai==0.2.77
+playwright==1.41.2
+selenium==4.17.2
+beautifulsoup4==4.12.3
+lxml==5.1.0
+requests==2.31.0
+urllib3==2.1.0
+
+# AI/LLM Integration
+openai==1.10.0
+anthropic==0.18.1
+
+# Utilities
+python-dotenv==1.0.1
+python-dateutil==2.8.2
+pytz==2024.1
+python-crontab==3.0.0
+croniter==2.0.1
+
+# Data processing and export
+pandas==2.2.0
+openpyxl==3.1.2
+
+# Validation and parsing
+pydantic==2.5.3
+marshmallow==3.20.2
+
+# Monitoring and logging
+sentry-sdk==1.40.0
+
+# Development and testing
+pytest==8.0.0
+pytest-django==4.7.0
+pytest-cov==4.1.0
+black==24.1.1
+flake8==7.0.0
+isort==5.13.2
+
+# WSGI server
+gunicorn==21.2.0
+uvicorn==0.27.0
