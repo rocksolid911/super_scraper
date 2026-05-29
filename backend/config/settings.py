@@ -125,6 +125,9 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Custom User model
+AUTH_USER_MODEL = 'authentication.User'
+
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -204,7 +207,12 @@ SCRAPER_CONFIG = {
 # AI/LLM Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
-DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL', 'gpt-4-turbo-preview')
+GOOGLE_GEMINI_API_KEY = os.getenv('GOOGLE_GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', '')
+FIRECRAWL_API_KEY = os.getenv('FIRECRAWL_API_KEY', '')
+# Default to a cheap, fast Gemini model. The agent can use a stronger planner model
+# (AI_PLANNER_MODEL) while extraction stays on the cheap default to minimize cost.
+DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL') or 'gemini-2.5-flash-lite'
+AI_PLANNER_MODEL = os.getenv('AI_PLANNER_MODEL') or DEFAULT_AI_MODEL
 AI_TEMPERATURE = float(os.getenv('AI_TEMPERATURE', '0.7'))
 AI_MAX_TOKENS = int(os.getenv('AI_MAX_TOKENS', '4096'))
 

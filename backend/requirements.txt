@@ -1,59 +1,75 @@
 # Django and DRF
-Django==5.0.1
-djangorestframework==3.14.0
+Django==5.1.9
+djangorestframework==3.15.2
 djangorestframework-simplejwt==5.3.1
-django-cors-headers==4.3.1
-django-filter==24.1
+django-cors-headers==4.4.0
+django-filter==24.3
 
 # Database
-psycopg2-binary==2.9.9
-dj-database-url==2.1.0
+psycopg2-binary==2.9.10
+dj-database-url==2.3.0
 
 # Celery and task scheduling
-celery==5.3.6
-redis==5.0.1
-django-celery-beat==2.5.0
+celery==5.4.0
+redis==5.2.1
+django-celery-beat==2.7.0
 django-celery-results==2.5.1
+flower==2.0.1
 
 # Web scraping
-crawl4ai==0.2.77
-playwright==1.41.2
-selenium==4.17.2
+crawl4ai==0.4.247
+playwright==1.49.0
+selenium==4.27.1
 beautifulsoup4==4.12.3
-lxml==5.1.0
-requests==2.31.0
-urllib3==2.1.0
+lxml==5.3.0
+requests==2.32.3
+urllib3==2.3.0
 
 # AI/LLM Integration
-openai==1.10.0
-anthropic==0.18.1
+openai==1.57.0
+anthropic==0.42.0
+
+# Agentic orchestration (LangGraph / LangChain)
+# Default model is Claude -> only langchain-anthropic is required. Install
+# langchain-openai separately if you switch DEFAULT_AI_MODEL to a GPT model
+# (it requires a newer openai than crawl4ai pins, so it's intentionally omitted).
+langgraph==0.2.60
+langchain==0.3.13
+langchain-core==0.3.28
+langchain-anthropic==0.3.1
+langchain-google-genai==2.0.8
+firecrawl-py==1.6.8
 
 # Utilities
 python-dotenv==1.0.1
-python-dateutil==2.8.2
-pytz==2024.1
-python-crontab==3.0.0
-croniter==2.0.1
+python-dateutil==2.9.0
+pytz==2024.2
+python-crontab==3.2.0
+croniter==3.0.3
 
 # Data processing and export
-pandas==2.2.0
-openpyxl==3.1.2
+pandas==2.2.3
+openpyxl==3.1.5
+
+# Google Sheets destination
+gspread==6.1.4
+google-auth==2.37.0
 
 # Validation and parsing
-pydantic==2.5.3
-marshmallow==3.20.2
+pydantic==2.10.4
+marshmallow==3.23.1
 
 # Monitoring and logging
-sentry-sdk==1.40.0
+sentry-sdk==2.19.2
 
 # Development and testing
-pytest==8.0.0
-pytest-django==4.7.0
-pytest-cov==4.1.0
-black==24.1.1
-flake8==7.0.0
+pytest==8.3.4
+pytest-django==4.9.0
+pytest-cov==6.0.0
+black==24.10.0
+flake8==7.1.1
 isort==5.13.2
 
 # WSGI server
-gunicorn==21.2.0
-uvicorn==0.27.0
+gunicorn==23.0.0
+uvicorn==0.34.0

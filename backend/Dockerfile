@@ -1,5 +1,5 @@
 # Multi-stage build for Python backend
-FROM python:3.11-slim as base
+FROM python:3.11-slim-bookworm as base
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -8,16 +8,15 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    postgresql-client \
     libpq-dev \
     wget \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Playwright dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \

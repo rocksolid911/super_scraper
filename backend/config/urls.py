@@ -9,7 +9,7 @@ from rest_framework import permissions
 
 urlpatterns = [
     # Admin
-    path('admin/', admin.site.admin_view),
+    path('admin/', admin.site.urls),
 
     # API endpoints
     path('api/auth/', include('apps.authentication.urls')),

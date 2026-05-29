@@ -7,7 +7,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
 from celery import shared_task
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain
+from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
 from .scraping_engine import ScrapingEngine
 from apps.core.utils import generate_unique_hash
 
@@ -15,12 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=3)
-def execute_scrape_job(self, job_id: int) -> dict:
+def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
     """
     Execute a scraping job.
 
     Args:
         job_id: ID of the ScrapeJob to execute
+        run_id: Optional pre-created JobRun to reuse (the API `run` action creates
+            one so the caller gets an id immediately). When omitted (e.g. the
+            scheduled path) the task creates its own run.
 
     Returns:
         Dictionary with execution results
@@ -31,13 +34,22 @@ def execute_scrape_job(self, job_id: int) -> dict:
         logger.error(f"ScrapeJob {job_id} does not exist")
         return {'success': False, 'error': 'Job not found'}
 
-    # Create job run
-    job_run = JobRun.objects.create(
-        job=job,
-        status=JobRun.Status.RUNNING,
-        started_at=timezone.now(),
-        task_id=self.request.id
-    )
+    # Reuse the run created by the caller, or create one for scheduled/direct calls.
+    job_run = None
+    if run_id is not None:
+        job_run = JobRun.objects.filter(id=run_id).first()
+        if job_run is not None:
+            job_run.status = JobRun.Status.RUNNING
+            job_run.started_at = timezone.now()
+            job_run.task_id = self.request.id
+            job_run.save()
+    if job_run is None:
+        job_run = JobRun.objects.create(
+            job=job,
+            status=JobRun.Status.RUNNING,
+            started_at=timezone.now(),
+            task_id=self.request.id
+        )
 
     try:
         logger.info(f"Starting scrape job: {job.name} (ID: {job_id})")
@@ -47,52 +59,86 @@ def execute_scrape_job(self, job_id: int) -> dict:
         urls = config.get('urls', [])
         selectors = config.get('selectors', {})
         pagination_config = config.get('pagination')
+        scrape_prompt = config.get('prompt') or config.get('scrape_prompt')
 
         if not urls:
             raise ValueError("No URLs configured for this job")
 
-        if not selectors:
-            raise ValueError("No selectors configured for this job")
+        # Decide the execution path:
+        #   * prompt mode without cached CSS selectors -> agentic LLM extraction
+        #   * visual mode / cached selectors           -> deterministic CSS extraction
+        has_selectors = bool(selectors and selectors.get('fields'))
+        use_agent = (job.mode == ScrapeJob.Mode.PROMPT) and not has_selectors
+        agent_errors = []
 
-        # Initialize scraping engine
-        engine = ScrapingEngine(
-            use_js_rendering=job.use_js_rendering,
-            respect_robots_txt=job.respect_robots_txt,
-            rate_limit=job.rate_limit,
-            timeout=settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT'],
-            max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES']
-        )
+        if use_agent:
+            if not scrape_prompt:
+                raise ValueError("Prompt-mode job requires a 'prompt' in its configuration")
 
-        # Scrape all URLs
-        all_items = []
-        total_pages = 0
-        urls_visited = []
+            from .agent import run_agent
+            logger.info(f"Running LangGraph agent for job {job_id}")
+            agent_out = run_agent(
+                prompt=scrape_prompt,
+                start_urls=urls,
+                max_steps=max(job.max_pages, 5),
+                max_items=config.get('max_items', 500),
+                js=job.use_js_rendering,
+                timeout=settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT'],
+            )
+            all_items = agent_out['rows']
+            urls_visited = agent_out['visited']
+            total_pages = len(urls_visited)
+            agent_errors = agent_out.get('errors', [])
+            engine_label = 'langgraph-agent'
+        else:
+            if not has_selectors:
+                raise ValueError("No selectors configured for this job")
 
-        for url in urls:
-            logger.info(f"Scraping URL: {url}")
-
-            # Run async scraping
-            result = asyncio.run(
-                engine.scrape_url(
-                    url=url,
-                    selectors=selectors,
-                    pagination_config=pagination_config,
-                    max_pages=job.max_pages
-                )
+            # Deterministic CSS extraction (visual mode / cached selectors), one
+            # browser lifecycle per run instead of a new event loop per URL.
+            engine = ScrapingEngine(
+                use_js_rendering=job.use_js_rendering,
+                respect_robots_txt=job.respect_robots_txt,
+                rate_limit=job.rate_limit,
+                timeout=settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT'],
+                max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES']
             )
 
-            items = result['items']
-            all_items.extend(items)
-            total_pages += result['pages_visited']
-            urls_visited.extend(result['urls_visited'])
+            async def _scrape_all():
+                collected = []
+                pages = 0
+                visited = []
+                for url in urls:
+                    logger.info(f"Scraping URL: {url}")
+                    result = await engine.scrape_url(
+                        url=url,
+                        selectors=selectors,
+                        pagination_config=pagination_config,
+                        max_pages=job.max_pages
+                    )
+                    collected.extend(result['items'])
+                    pages += result['pages_visited']
+                    visited.extend(result['urls_visited'])
+                    logger.info(f"Scraped {len(result['items'])} items from {url}")
+                return collected, pages, visited
 
-            logger.info(f"Scraped {len(items)} items from {url}")
+            all_items, total_pages, urls_visited = asyncio.run(_scrape_all())
+            engine_label = 'playwright' if job.use_js_rendering else 'requests'
 
         # Save scraped items
         items_created = 0
         items_duplicated = 0
 
         for item_data in all_items:
+            if not isinstance(item_data, dict):
+                continue
+            # The agent tags rows with their origin URL; keep it out of the stored data.
+            source_url = item_data.pop('_source_url', None) or (urls[0] if urls else '')
+
+            # Skip rows where every value is empty (LLM sometimes returns blank rows).
+            if not any(v not in (None, '', []) for v in item_data.values()):
+                continue
+
             # Generate unique hash for deduplication
             unique_hash = generate_unique_hash(item_data)
 
@@ -109,14 +155,17 @@ def execute_scrape_job(self, job_id: int) -> dict:
                 job=job,
                 run=job_run,
                 data=item_data,
-                source_url=item_data.get('_source_url', urls[0]),
+                source_url=source_url,
                 unique_hash=unique_hash,
                 metadata={
                     'scraped_at': timezone.now().isoformat(),
-                    'engine': 'playwright' if job.use_js_rendering else 'requests'
+                    'engine': engine_label
                 }
             )
             items_created += 1
+
+        # Push this run's new items to any configured external destinations.
+        delivery_results = deliver_run_to_destinations(job, job_run)
 
         # Calculate duration
         finished_at = timezone.now()
@@ -133,7 +182,9 @@ def execute_scrape_job(self, job_id: int) -> dict:
             'items_created': items_created,
             'items_duplicated': items_duplicated,
             'urls_visited': urls_visited,
-            'urls_count': len(urls_visited)
+            'urls_count': len(urls_visited),
+            'agent_errors': agent_errors,
+            'destinations': delivery_results,
         }
         job_run.save()
 
@@ -338,6 +389,52 @@ def generate_ai_schema_task(
         }
     finally:
         asyncio.run(engine.close_browser())
+
+
+def deliver_run_to_destinations(job, job_run) -> list:
+    """
+    Push the items created in this run to every enabled destination on the job.
+
+    Returns a list of per-destination result dicts (also stored on the run stats).
+    A destination failure never fails the run — it's recorded and reported.
+    """
+    from .destinations import get_destination
+    from .export_utils import flatten_items
+
+    destinations = list(job.destinations.filter(enabled=True))
+    if not destinations:
+        return []
+
+    items = list(job_run.items.all().order_by('created_at'))
+    if not items:
+        return [{'id': d.id, 'name': d.name, 'success': True, 'rows_delivered': 0,
+                 'note': 'no new items'} for d in destinations]
+
+    columns, rows = flatten_items(items)
+    results = []
+    for dest in destinations:
+        try:
+            handler = get_destination(dest.dest_type, dest.config)
+            result = handler.deliver(columns, rows)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Destination {dest.id} ({dest.dest_type}) failed: {e}", exc_info=True)
+            from .destinations.base import DeliveryResult
+            result = DeliveryResult(success=False, error=str(e))
+
+        dest.last_delivery_at = timezone.now()
+        dest.last_status = 'success' if result.success else 'failed'
+        dest.last_error = '' if result.success else (result.error or '')[:2000]
+        if result.success:
+            dest.total_rows_delivered += result.rows_delivered
+        dest.save(update_fields=['last_delivery_at', 'last_status', 'last_error',
+                                 'total_rows_delivered', 'updated_at'])
+
+        results.append({
+            'id': dest.id, 'name': dest.name, 'type': dest.dest_type,
+            'success': result.success, 'rows_delivered': result.rows_delivered,
+            'error': result.error,
+        })
+    return results
 
 
 def calculate_next_run_time(schedule_config: dict):
