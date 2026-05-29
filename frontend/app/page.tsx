@@ -13,7 +13,6 @@ export default function Dashboard() {
 
   // create form
   const [name, setName] = useState('');
-  const [mode, setMode] = useState<'prompt' | 'visual'>('prompt');
   const [urls, setUrls] = useState('');
   const [prompt, setPrompt] = useState('');
   const [js, setJs] = useState(false);
@@ -46,11 +45,10 @@ export default function Dashboard() {
     setCreating(true);
     try {
       const urlList = urls.split(/[\n,]+/).map((u) => u.trim()).filter(Boolean);
-      const configuration: Record<string, any> = { urls: urlList };
-      if (mode === 'prompt') configuration.prompt = prompt;
+      const configuration: Record<string, any> = { urls: urlList, prompt };
       const job = await createJob({
         name,
-        mode,
+        mode: 'prompt',
         configuration,
         use_js_rendering: js,
       });
@@ -67,37 +65,30 @@ export default function Dashboard() {
     <>
       <TopBar />
       <div className="container">
-        <h1>New scrape job</h1>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <h1 style={{ margin: 0 }}>New scrape job</h1>
+          <button className="secondary" onClick={() => router.push('/visual')}>
+            🖱 Visual selector
+          </button>
+        </div>
+        <p className="notice" style={{ margin: '6px 0 16px' }}>
+          Describe what you want in natural language below, or use the visual selector to click fields on a live page.
+        </p>
         <div className="card">
           <form onSubmit={submit}>
             <label>Job name</label>
             <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="WB 2021 candidates" />
 
-            <label>Mode</label>
-            <select value={mode} onChange={(e) => setMode(e.target.value as any)}>
-              <option value="prompt">Natural language (AI agent)</option>
-              <option value="visual">Visual selector</option>
-            </select>
-
             <label>URL(s) — one per line</label>
             <textarea value={urls} onChange={(e) => setUrls(e.target.value)} required placeholder="https://myneta.info/WestBengal2021/" />
 
-            {mode === 'prompt' ? (
-              <>
-                <label>What do you want to extract?</label>
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  required
-                  placeholder="Get every constituency with its name and election date."
-                />
-              </>
-            ) : (
-              <p className="notice">
-                Visual selector picking UI is coming next. For now, create the job and configure
-                selectors via the API (<code>/snapshot/</code> + <code>/infer-selectors/</code>).
-              </p>
-            )}
+            <label>What do you want to extract?</label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              required
+              placeholder="Get every constituency with its name and election date."
+            />
 
             <label className="row" style={{ marginTop: 12 }}>
               <input type="checkbox" checked={js} onChange={(e) => setJs(e.target.checked)} style={{ width: 'auto' }} />
