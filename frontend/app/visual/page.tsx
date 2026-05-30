@@ -26,6 +26,7 @@ export default function VisualSelector() {
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState('');
+  const [respectRobots, setRespectRobots] = useState(true);
   const [error, setError] = useState('');
 
   if (typeof window !== 'undefined' && !getToken()) {
@@ -93,6 +94,7 @@ export default function VisualSelector() {
         mode: 'visual',
         configuration: { urls: [url], selectors: preview.selectors },
         use_js_rendering: useJs,
+        respect_robots_txt: respectRobots,
       });
       router.push(`/jobs/${job.id}`);
     } catch (err) {
@@ -235,6 +237,10 @@ export default function VisualSelector() {
                   )}
                   <label>Job name</label>
                   <input value={name} onChange={(e) => setName(e.target.value)} placeholder={`Visual: ${url}`} />
+                  <label className="row" style={{ marginTop: 10, width: 'auto' }}>
+                    <input type="checkbox" checked={respectRobots} onChange={(e) => setRespectRobots(e.target.checked)} style={{ width: 'auto' }} />
+                    <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
+                  </label>
                   <div style={{ marginTop: 12 }}>
                     <button onClick={save} disabled={saving || sampleItems.length === 0}>
                       {saving ? 'Saving…' : 'Save as job'}

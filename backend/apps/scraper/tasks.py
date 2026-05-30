@@ -70,6 +70,7 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
         has_selectors = bool(selectors and selectors.get('fields'))
         use_agent = (job.mode == ScrapeJob.Mode.PROMPT) and not has_selectors
         agent_errors = []
+        blocked_urls = []
 
         if use_agent:
             if not scrape_prompt:
@@ -135,6 +136,7 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
 
             all_items, total_pages, urls_visited = asyncio.run(_scrape_all())
             engine_label = 'playwright' if job.use_js_rendering else 'requests'
+            blocked_urls = list(engine.blocked_urls)
 
             # Self-heal: a cached CSS schema that suddenly returns nothing is stale
             # (site changed). Drop it so the next run re-derives via the agent.
@@ -190,18 +192,38 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
         finished_at = timezone.now()
         duration = (finished_at - job_run.started_at).total_seconds()
 
+        # A run that fetched no page and produced no row didn't really "succeed" —
+        # surface why instead of reporting an empty success the user can't explain.
+        run_error_message = ''
+        if total_pages == 0 and items_created == 0:
+            if blocked_urls:
+                run_error_message = (
+                    f"All {len(blocked_urls)} URL(s) were blocked by robots.txt, so nothing "
+                    f"was fetched. Turn off 'Respect robots.txt' for this job to scrape anyway. "
+                    f"Blocked: {', '.join(blocked_urls[:5])}"
+                )
+            else:
+                run_error_message = (
+                    "No pages could be fetched (every URL failed to load or returned empty). "
+                    "Check the URL(s) and try toggling 'Use JS rendering'."
+                )
+        run_succeeded = not run_error_message
+
         # Update job run
-        job_run.status = JobRun.Status.SUCCESS
+        job_run.status = JobRun.Status.SUCCESS if run_succeeded else JobRun.Status.FAILED
         job_run.finished_at = finished_at
         job_run.duration_seconds = duration
         job_run.items_scraped = items_created
         job_run.pages_visited = total_pages
+        job_run.error_message = run_error_message
+        job_run.errors_count = 0 if run_succeeded else 1
         job_run.stats = {
             'total_items_found': len(all_items),
             'items_created': items_created,
             'items_duplicated': items_duplicated,
             'urls_visited': urls_visited,
             'urls_count': len(urls_visited),
+            'blocked_urls': blocked_urls,
             'agent_errors': agent_errors,
             'destinations': delivery_results,
         }
@@ -209,7 +231,10 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
 
         # Update job statistics
         job.total_runs += 1
-        job.successful_runs += 1
+        if run_succeeded:
+            job.successful_runs += 1
+        else:
+            job.failed_runs += 1
         job.total_items_scraped += items_created
         job.last_run_at = finished_at
 
@@ -219,18 +244,22 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
 
         job.save()
 
-        logger.info(
-            f"Job {job.name} completed successfully. "
-            f"Scraped {items_created} items in {duration:.2f}s"
-        )
+        if run_succeeded:
+            logger.info(
+                f"Job {job.name} completed successfully. "
+                f"Scraped {items_created} items in {duration:.2f}s"
+            )
+        else:
+            logger.warning(f"Job {job.name} produced no data: {run_error_message}")
 
         return {
-            'success': True,
+            'success': run_succeeded,
             'job_id': job_id,
             'run_id': job_run.id,
             'items_scraped': items_created,
             'pages_visited': total_pages,
-            'duration': duration
+            'duration': duration,
+            'error': run_error_message,
         }
 
     except Exception as e:

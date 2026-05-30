@@ -16,6 +16,7 @@ export default function Dashboard() {
   const [urls, setUrls] = useState('');
   const [prompt, setPrompt] = useState('');
   const [js, setJs] = useState(false);
+  const [respectRobots, setRespectRobots] = useState(true);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -51,6 +52,7 @@ export default function Dashboard() {
         mode: 'prompt',
         configuration,
         use_js_rendering: js,
+        respect_robots_txt: respectRobots,
       });
       router.push(`/jobs/${job.id}`);
     } catch (err) {
@@ -93,6 +95,11 @@ export default function Dashboard() {
             <label className="row" style={{ marginTop: 12 }}>
               <input type="checkbox" checked={js} onChange={(e) => setJs(e.target.checked)} style={{ width: 'auto' }} />
               <span>Render JavaScript (slower, needed for SPA sites)</span>
+            </label>
+
+            <label className="row" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={respectRobots} onChange={(e) => setRespectRobots(e.target.checked)} style={{ width: 'auto' }} />
+              <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
             </label>
 
             {error && <div className="error">{error}</div>}

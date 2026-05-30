@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
 import Schedule from '@/components/Schedule';
 import Destinations from '@/components/Destinations';
 import {
-  getJob, jobRuns, jobItems, runJob, getToken, exportUrl,
+  getJob, jobRuns, jobItems, runJob, updateJob, getToken, exportUrl,
   Job, JobRun, ScrapedItem, ApiError,
 } from '@/lib/api';
 
@@ -77,6 +77,17 @@ export default function JobDetail() {
     }
   }
 
+  async function toggleRobots(value: boolean) {
+    setError('');
+    try {
+      const updated = await updateJob(id, { respect_robots_txt: value });
+      setJob(updated);
+    } catch (err) {
+      const e = err as ApiError;
+      setError(typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail));
+    }
+  }
+
   async function doExport(fmt: 'csv' | 'xlsx' | 'json') {
     const res = await fetch(exportUrl(id), {
       method: 'POST',
@@ -118,6 +129,15 @@ export default function JobDetail() {
               <button className="secondary" onClick={() => doExport('json')}>JSON</button>
             </div>
           </div>
+          <label className="row" style={{ marginTop: 12, width: 'auto' }}>
+            <input
+              type="checkbox"
+              checked={job?.respect_robots_txt ?? true}
+              onChange={(e) => toggleRobots(e.target.checked)}
+              style={{ width: 'auto' }}
+            />
+            <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
+          </label>
           {error && <div className="error">{error}</div>}
         </div>
 
@@ -137,14 +157,21 @@ export default function JobDetail() {
               </thead>
               <tbody>
                 {runs.map((r) => (
-                  <tr key={r.id}>
-                    <td>{r.id}</td>
-                    <td><span className={`badge ${r.status}`}>{r.status}</span></td>
-                    <td>{r.items_scraped}</td>
-                    <td>{r.pages_visited}</td>
-                    <td>{r.duration_seconds ? `${r.duration_seconds.toFixed(1)}s` : '—'}</td>
-                    <td className="muted">{new Date(r.created_at).toLocaleString()}</td>
-                  </tr>
+                  <Fragment key={r.id}>
+                    <tr>
+                      <td>{r.id}</td>
+                      <td><span className={`badge ${r.status}`}>{r.status}</span></td>
+                      <td>{r.items_scraped}</td>
+                      <td>{r.pages_visited}</td>
+                      <td>{r.duration_seconds ? `${r.duration_seconds.toFixed(1)}s` : '—'}</td>
+                      <td className="muted">{new Date(r.created_at).toLocaleString()}</td>
+                    </tr>
+                    {r.error_message && (
+                      <tr>
+                        <td colSpan={6} className="error" style={{ fontSize: 13 }}>⚠ {r.error_message}</td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
