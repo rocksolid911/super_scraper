@@ -327,7 +327,9 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
         for item in items:
             row = {
                 'ID': item.id,
-                'Created At': item.created_at,
+                # openpyxl can't write tz-aware datetimes; drop tzinfo (converting
+                # to local time first) so it stays a real Excel date cell.
+                'Created At': timezone.localtime(item.created_at).replace(tzinfo=None),
                 'Source URL': item.source_url
             }
             row.update(item.data)
