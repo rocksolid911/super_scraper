@@ -202,6 +202,10 @@ SCRAPER_CONFIG = {
     'MAX_CONCURRENT_JOBS': int(os.getenv('SCRAPER_MAX_CONCURRENT_JOBS', '5')),
     'ENABLE_JS_RENDERING': os.getenv('SCRAPER_ENABLE_JS_RENDERING', 'True') == 'True',
     'HEADLESS_BROWSER': os.getenv('SCRAPER_HEADLESS_BROWSER', 'True') == 'True',
+    # Global rotating proxy pool. Comma-separated proxy URLs, e.g.
+    #   PROXY_URLS=http://user:pass@host:8000,http://user:pass@host2:8000
+    # A job may override this with configuration['proxy'] (a URL or list of URLs).
+    'PROXY_URLS': [p.strip() for p in os.getenv('PROXY_URLS', '').split(',') if p.strip()],
 }
 
 # AI/LLM Configuration

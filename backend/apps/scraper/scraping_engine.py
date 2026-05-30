@@ -32,7 +32,8 @@ class ScrapingEngine:
         rate_limit: float = 1.0,
         user_agent: Optional[str] = None,
         timeout: int = 30,
-        max_retries: int = 3
+        max_retries: int = 3,
+        proxies: Optional[List[str]] = None
     ):
         """
         Initialize scraping engine.
@@ -44,6 +45,8 @@ class ScrapingEngine:
             user_agent: Custom user agent string
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries
+            proxies: Optional rotating proxy pool (URLs). Falls back to the global
+                SCRAPER_CONFIG['PROXY_URLS'] when not given.
         """
         self.use_js_rendering = use_js_rendering
         self.respect_robots_txt = respect_robots_txt
@@ -57,6 +60,13 @@ class ScrapingEngine:
         # URLs skipped because robots.txt disallowed them; lets callers tell a
         # robots-blocked run apart from one that simply found no data.
         self.blocked_urls = []
+        # Rotating proxy pool + per-proxy cooldown (epoch until which it's parked
+        # after a failure / 403 / 429). Empty pool == direct connection.
+        self.proxies = list(proxies) if proxies else list(
+            settings.SCRAPER_CONFIG.get('PROXY_URLS', [])
+        )
+        self._proxy_idx = 0
+        self._proxy_cooldown: Dict[str, float] = {}
 
     async def initialize_browser(self):
         """Initialize Playwright browser if needed."""
@@ -81,6 +91,52 @@ class ScrapingEngine:
             await self.playwright.stop()
             self.playwright = None
             logger.info("Playwright browser closed")
+
+    # ----- Proxy pool ------------------------------------------------------
+
+    def _pick_proxy(self) -> Optional[str]:
+        """Round-robin the next proxy that isn't in cooldown, or None (direct)."""
+        if not self.proxies:
+            return None
+        now = time.time()
+        for _ in range(len(self.proxies)):
+            proxy = self.proxies[self._proxy_idx % len(self.proxies)]
+            self._proxy_idx += 1
+            if self._proxy_cooldown.get(proxy, 0) <= now:
+                return proxy
+        # Every proxy is cooling down — use the soonest-available one anyway.
+        return min(self.proxies, key=lambda p: self._proxy_cooldown.get(p, 0))
+
+    def _cooldown_proxy(self, proxy: Optional[str], seconds: int = 300) -> None:
+        """Park a proxy for ``seconds`` after a failure / block."""
+        if proxy:
+            self._proxy_cooldown[proxy] = time.time() + seconds
+            logger.warning(f"Proxy parked for {seconds}s after failure: {self._mask(proxy)}")
+
+    @staticmethod
+    def _mask(proxy: str) -> str:
+        """Hide credentials when logging a proxy URL."""
+        try:
+            p = urlparse(proxy)
+            host = p.hostname or ''
+            port = f":{p.port}" if p.port else ''
+            return f"{p.scheme}://{host}{port}"
+        except Exception:
+            return '<proxy>'
+
+    @staticmethod
+    def _playwright_proxy(proxy: Optional[str]) -> Optional[Dict[str, str]]:
+        """Convert a proxy URL into Playwright's {server, username, password} form."""
+        if not proxy:
+            return None
+        p = urlparse(proxy)
+        server = f"{p.scheme}://{p.hostname}{':' + str(p.port) if p.port else ''}"
+        out = {'server': server}
+        if p.username:
+            out['username'] = p.username
+        if p.password:
+            out['password'] = p.password
+        return out
 
     def check_robots_txt(self, url: str) -> bool:
         """
@@ -139,12 +195,18 @@ class ScrapingEngine:
             self.rate_limiter.wait_if_needed(domain)
 
         for attempt in range(self.max_retries):
+            # Rotate to the next healthy proxy for each attempt (None = direct).
+            proxy = self._pick_proxy()
             try:
                 if self.use_js_rendering:
-                    return await self._fetch_with_browser(url)
+                    return await self._fetch_with_browser(url, proxy)
                 else:
-                    return await self._fetch_with_requests(url)
+                    return await self._fetch_with_requests(url, proxy)
             except Exception as e:
+                # Park the proxy on a block/forbidden/rate-limit so the next attempt
+                # rotates away from it.
+                if proxy and self._is_block_error(e):
+                    self._cooldown_proxy(proxy)
                 logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
@@ -154,12 +216,22 @@ class ScrapingEngine:
 
         return None
 
-    async def _fetch_with_requests(self, url: str) -> str:
+    @staticmethod
+    def _is_block_error(exc: Exception) -> bool:
+        """True if the exception looks like an IP/proxy block (403/429/connection)."""
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        if status in (403, 407, 429):
+            return True
+        text = str(exc).lower()
+        return any(s in text for s in ('403', '429', 'proxy', 'timeout', 'connection'))
+
+    async def _fetch_with_requests(self, url: str, proxy: Optional[str] = None) -> str:
         """
         Fetch page using requests library.
 
         Args:
             url: URL to fetch
+            proxy: Optional proxy URL to route this request through
 
         Returns:
             Page HTML content
@@ -178,17 +250,20 @@ class ScrapingEngine:
             url,
             headers=headers,
             timeout=self.timeout,
-            allow_redirects=True
+            allow_redirects=True,
+            proxies={'http': proxy, 'https': proxy} if proxy else None
         )
         response.raise_for_status()
         return response.text
 
-    async def _fetch_with_browser(self, url: str) -> str:
+    async def _fetch_with_browser(self, url: str, proxy: Optional[str] = None) -> str:
         """
         Fetch page using Playwright browser.
 
         Args:
             url: URL to fetch
+            proxy: Optional proxy URL; applied at the browser context so it can
+                rotate per request without relaunching the browser.
 
         Returns:
             Page HTML content
@@ -196,7 +271,9 @@ class ScrapingEngine:
         if not self.browser:
             await self.initialize_browser()
 
-        page = await self.browser.new_page()
+        # Per-context proxy lets each fetch use a different pool member.
+        context = await self.browser.new_context(proxy=self._playwright_proxy(proxy))
+        page = await context.new_page()
         page.set_default_timeout(self.timeout * 1000)
 
         try:
@@ -207,6 +284,7 @@ class ScrapingEngine:
             return content
         finally:
             await page.close()
+            await context.close()
 
     def extract_data(
         self,

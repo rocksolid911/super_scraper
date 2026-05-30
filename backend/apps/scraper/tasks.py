@@ -106,6 +106,12 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
             if not has_selectors:
                 raise ValueError("No selectors configured for this job")
 
+            # Per-job proxy override (a URL or list); otherwise the engine falls
+            # back to the global SCRAPER_CONFIG['PROXY_URLS'] pool.
+            job_proxy = config.get('proxy')
+            if isinstance(job_proxy, str):
+                job_proxy = [job_proxy]
+
             # Deterministic CSS extraction (visual mode / cached selectors), one
             # browser lifecycle per run instead of a new event loop per URL.
             engine = ScrapingEngine(
@@ -113,7 +119,8 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
                 respect_robots_txt=job.respect_robots_txt,
                 rate_limit=job.rate_limit,
                 timeout=settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT'],
-                max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES']
+                max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES'],
+                proxies=job_proxy
             )
 
             async def _scrape_all():
