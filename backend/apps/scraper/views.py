@@ -581,15 +581,24 @@ class InferSelectorsView(generics.GenericAPIView):
         container = serializer.validated_data.get('container') or None
         use_js = serializer.validated_data['use_js_rendering']
 
-        selectors = build_selectors(fields, container=container)
-
+        # Fetch the page once, then infer the repeating container against the real
+        # DOM and sample rows from that same HTML (one render, not two).
         try:
-            sample = asyncio.run(
-                SelectorTester.test_selectors(url, selectors, use_js_rendering=use_js)
-            )
+            html = asyncio.run(SelectorTester.fetch_html(url, use_js_rendering=use_js))
         except Exception as e:
-            logger.error(f"Selector sampling failed for {url}: {e}", exc_info=True)
-            sample = {'success': False, 'error': str(e), 'items': []}
+            logger.error(f"Selector page fetch failed for {url}: {e}", exc_info=True)
+            html = None
+
+        selectors = build_selectors(fields, container=container, html=html)
+
+        if html:
+            try:
+                sample = SelectorTester.sample_from_html(html, selectors, url)
+            except Exception as e:
+                logger.error(f"Selector sampling failed for {url}: {e}", exc_info=True)
+                sample = {'success': False, 'error': str(e), 'items': []}
+        else:
+            sample = {'success': False, 'error': 'Failed to fetch page', 'items': []}
 
         return Response({'selectors': selectors, 'sample': sample})
 

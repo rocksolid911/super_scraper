@@ -392,6 +392,31 @@ class SelectorTester:
     """
 
     @staticmethod
+    async def fetch_html(url: str, use_js_rendering: bool = False) -> Optional[str]:
+        """Fetch a page's HTML (ignoring robots.txt — this is interactive testing)."""
+        engine = ScrapingEngine(
+            use_js_rendering=use_js_rendering,
+            respect_robots_txt=False
+        )
+        try:
+            return await engine.fetch_page(url)
+        finally:
+            if use_js_rendering:
+                await engine.close_browser()
+
+    @staticmethod
+    def sample_from_html(html: str, selectors: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """Extract sample rows from already-fetched HTML (no network)."""
+        engine = ScrapingEngine(respect_robots_txt=False)
+        items = engine.extract_data(html, selectors, url)
+        return {
+            'success': True,
+            'items': items[:20],
+            'total_found': len(items),
+            'selectors_tested': len(selectors.get('fields', {})),
+        }
+
+    @staticmethod
     async def test_selectors(
         url: str,
         selectors: Dict[str, Any],

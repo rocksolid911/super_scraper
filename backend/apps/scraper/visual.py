@@ -127,18 +127,15 @@ def _strip_nth(token: str) -> str:
     return re.sub(r':nth-of-type\(\d+\)', '', token).strip()
 
 
-def infer_container(field_selectors: List[str]) -> Optional[str]:
-    """
-    Infer a repeating-item container selector from per-field selectors.
+def _common_ancestor(field_selectors: List[str]) -> List[str]:
+    """Longest common leading token chain shared by every field selector.
 
-    Strategy: take the longest common ancestor chain shared by all field selectors,
-    then generalize its last token (drop ``:nth-of-type``) so it matches every
-    sibling item. Returns ``None`` when the fields share no meaningful ancestor
-    (single-item page).
+    Steps up one level if every field shares the entire path (they'd be the same
+    element, which can't be a container). Returns ``[]`` when there's no shared
+    ancestor.
     """
     if len(field_selectors) < 1:
-        return None
-
+        return []
     token_lists = [_tokens(s) for s in field_selectors]
     common: List[str] = []
     for group in zip(*token_lists):
@@ -146,33 +143,126 @@ def infer_container(field_selectors: List[str]) -> Optional[str]:
             common.append(group[0])
         else:
             break
+    if not common:
+        return []
+    if len(common) == min(len(t) for t in token_lists):
+        common = common[:-1]
+    return common
 
-    # Drop trailing tokens that are identical to a full field selector (a field that
-    # is itself the common ancestor isn't a container).
+
+def infer_container(field_selectors: List[str]) -> Optional[str]:
+    """
+    Infer a repeating-item container selector from per-field selectors (string-only).
+
+    Strategy: take the longest common ancestor chain shared by all field selectors,
+    then generalize its last token (drop ``:nth-of-type``) so it matches every
+    sibling item. Returns ``None`` when the fields share no meaningful ancestor
+    (single-item page).
+
+    NOTE: this guesses that the *innermost* common ancestor is the repeating unit,
+    which is wrong when all fields were sampled from a single example row (the real
+    repeating level is a higher ancestor — its ``:nth-of-type`` stays pinned, so the
+    container matches only one row). Prefer :func:`infer_container_dom` when the page
+    HTML is available; this remains the no-DOM fallback.
+    """
+    common = _common_ancestor(field_selectors)
     if not common:
         return None
-    if len(common) == min(len(t) for t in token_lists):
-        # All fields share the entire path -> they're the same element; step up one.
-        common = common[:-1]
-        if not common:
-            return None
-
     container_tokens = common[:-1] + [_strip_nth(common[-1])]
     return ' > '.join(container_tokens)
+
+
+def infer_container_dom(
+    html: str,
+    field_selectors: List[str],
+    min_rows: int = 2,
+) -> Optional[str]:
+    """
+    DOM-aware container inference: pick the ancestor level that actually repeats.
+
+    Even when every field was clicked on one example row, the row's ancestors form
+    the common chain. We try generalizing each ancestor level (dropping its
+    ``:nth-of-type`` and truncating there), then test the candidate against the real
+    DOM. The best container is the one matching the most elements (``>= min_rows``)
+    in which *every* field sub-selector still resolves — i.e. the genuine repeating
+    item. Falls back to ``None`` (caller uses the string heuristic) if nothing
+    repeats.
+    """
+    from bs4 import BeautifulSoup
+
+    common = _common_ancestor(field_selectors)
+    if not common:
+        return None
+
+    token_lists = [_tokens(s) for s in field_selectors]
+    soup = BeautifulSoup(html, 'html.parser')
+
+    best: Optional[str] = None
+    best_count = 0
+    # Deepest level first so ties favour the most specific (closest-to-fields) container.
+    for j in range(len(common) - 1, -1, -1):
+        cand_tokens = common[:j] + [_strip_nth(common[j])]
+        candidate = ' > '.join(cand_tokens)
+        try:
+            containers = soup.select(candidate)
+        except Exception:
+            continue
+        if len(containers) <= 1:
+            continue
+
+        # Field selectors rewritten relative to this candidate container.
+        rel_selectors: List[str] = []
+        usable = True
+        for ft in token_lists:
+            if len(ft) <= len(cand_tokens):
+                usable = False
+                break
+            rel_selectors.append(' > '.join(ft[len(cand_tokens):]))
+        if not usable:
+            continue
+
+        # Count containers where *every* field resolves -> a real, fully-populated row.
+        count = 0
+        for c in containers:
+            if all(_safe_select_one(c, rs) for rs in rel_selectors):
+                count += 1
+        if count > best_count:
+            best_count = count
+            best = candidate
+
+    return best if best_count >= min_rows else None
+
+
+def _safe_select_one(node, selector: str) -> bool:
+    """True if ``selector`` resolves to an element under ``node`` (errors -> False)."""
+    if not selector:
+        return False
+    try:
+        return node.select_one(selector) is not None
+    except Exception:
+        return False
 
 
 def build_selectors(
     fields: List[Dict[str, Any]],
     container: Optional[str] = None,
+    html: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build the internal ``selectors`` config from clicked field definitions.
 
     ``fields`` items: ``{name, selector, attr?, type?}``. When ``container`` is set (or
-    inferred), each field selector is rewritten relative to the container.
+    inferred), each field selector is rewritten relative to the container. If ``html``
+    is supplied and no explicit ``container`` is given, the repeating container is
+    inferred against the real DOM (:func:`infer_container_dom`), falling back to the
+    string-only heuristic when nothing repeats.
     """
     if container is None:
-        container = infer_container([f['selector'] for f in fields])
+        field_sels = [f['selector'] for f in fields]
+        if html:
+            container = infer_container_dom(html, field_sels)
+        if container is None:
+            container = infer_container(field_sels)
 
     container_tokens = _tokens(container) if container else []
 
