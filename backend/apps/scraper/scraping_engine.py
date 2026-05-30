@@ -47,6 +47,9 @@ class ScrapingEngine:
         self.robots_cache = {}
         self.browser = None
         self.playwright = None
+        # URLs skipped because robots.txt disallowed them; lets callers tell a
+        # robots-blocked run apart from one that simply found no data.
+        self.blocked_urls = []
 
     async def initialize_browser(self):
         """Initialize Playwright browser if needed."""
@@ -119,6 +122,8 @@ class ScrapingEngine:
         # Check robots.txt
         if not self.check_robots_txt(url):
             logger.warning(f"URL blocked by robots.txt: {url}")
+            if url not in self.blocked_urls:
+                self.blocked_urls.append(url)
             return None
 
         # Rate limiting
