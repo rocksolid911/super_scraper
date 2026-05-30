@@ -47,6 +47,9 @@ class ScrapingEngine:
         self.robots_cache = {}
         self.browser = None
         self.playwright = None
+        # URLs skipped because robots.txt disallowed them; lets callers tell a
+        # robots-blocked run apart from one that simply found no data.
+        self.blocked_urls = []
 
     async def initialize_browser(self):
         """Initialize Playwright browser if needed."""
@@ -119,6 +122,8 @@ class ScrapingEngine:
         # Check robots.txt
         if not self.check_robots_txt(url):
             logger.warning(f"URL blocked by robots.txt: {url}")
+            if url not in self.blocked_urls:
+                self.blocked_urls.append(url)
             return None
 
         # Rate limiting
@@ -385,6 +390,31 @@ class SelectorTester:
     """
     Test selectors on a page and return sample data.
     """
+
+    @staticmethod
+    async def fetch_html(url: str, use_js_rendering: bool = False) -> Optional[str]:
+        """Fetch a page's HTML (ignoring robots.txt — this is interactive testing)."""
+        engine = ScrapingEngine(
+            use_js_rendering=use_js_rendering,
+            respect_robots_txt=False
+        )
+        try:
+            return await engine.fetch_page(url)
+        finally:
+            if use_js_rendering:
+                await engine.close_browser()
+
+    @staticmethod
+    def sample_from_html(html: str, selectors: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """Extract sample rows from already-fetched HTML (no network)."""
+        engine = ScrapingEngine(respect_robots_txt=False)
+        items = engine.extract_data(html, selectors, url)
+        return {
+            'success': True,
+            'items': items[:20],
+            'total_found': len(items),
+            'selectors_tested': len(selectors.get('fields', {})),
+        }
 
     @staticmethod
     async def test_selectors(

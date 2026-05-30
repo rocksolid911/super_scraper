@@ -14,6 +14,17 @@ class User(AbstractUser):
     profile_image = models.URLField(blank=True, null=True)
     is_email_verified = models.BooleanField(default=False)
 
+    groups = models.ManyToManyField(
+        'auth.Group',
+        related_name='authentication_user_set',
+        blank=True,
+    )
+    user_permissions = models.ManyToManyField(
+        'auth.Permission',
+        related_name='authentication_user_set',
+        blank=True,
+    )
+
     # Preferences
     preferences = models.JSONField(default=dict, blank=True)
 

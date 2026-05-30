@@ -249,6 +249,49 @@ class ScrapedItem(TimeStampedModel):
         return data_str
 
 
+class DataDestination(TimeStampedModel):
+    """
+    A configured place to push a job's scraped rows after each run, in addition to
+    the in-app storage: an external Postgres table, a Google Sheet, or a webhook.
+    """
+    class Type(models.TextChoices):
+        POSTGRES = 'postgres', 'External Postgres'
+        GOOGLE_SHEETS = 'google_sheets', 'Google Sheets'
+        WEBHOOK = 'webhook', 'Webhook'
+
+    job = models.ForeignKey(
+        ScrapeJob,
+        on_delete=models.CASCADE,
+        related_name='destinations'
+    )
+    name = models.CharField(max_length=255)
+    dest_type = models.CharField(max_length=20, choices=Type.choices)
+
+    # Connection/config: DSN + table (postgres), spreadsheet id + creds (sheets),
+    # url + secret (webhook). Secrets live here for now; encrypt at rest in prod.
+    config = models.JSONField(default=dict)
+
+    enabled = models.BooleanField(default=True)
+
+    # Delivery tracking
+    last_delivery_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=20, blank=True)
+    last_error = models.TextField(blank=True)
+    total_rows_delivered = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'data_destinations'
+        verbose_name = 'Data Destination'
+        verbose_name_plural = 'Data Destinations'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['job', 'enabled']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.dest_type}) -> {self.job.name}"
+
+
 class WebsiteDomain(TimeStampedModel):
     """
     Model for tracking website domain settings and statistics.

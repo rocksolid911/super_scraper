@@ -16,7 +16,7 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain
+from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
 from .serializers import (
     ScrapeJobSerializer,
     ScrapeJobListSerializer,
@@ -27,7 +27,10 @@ from .serializers import (
     UpdateScheduleSerializer,
     AISchemaGenerationSerializer,
     ExportDataSerializer,
-    WebsiteDomainSerializer
+    WebsiteDomainSerializer,
+    SnapshotSerializer,
+    InferSelectorsSerializer,
+    DataDestinationSerializer,
 )
 from .tasks import (
     execute_scrape_job,
@@ -79,27 +82,38 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
         job = self.get_object()
 
         # Validate job configuration
-        if not job.configuration.get('urls'):
+        config = job.configuration or {}
+        if not config.get('urls'):
             return Response(
                 {'error': 'Job has no URLs configured'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if not job.configuration.get('selectors'):
+        # Prompt-mode jobs run the agent from a natural-language prompt; visual /
+        # cached-selector jobs need a selectors config.
+        has_selectors = bool((config.get('selectors') or {}).get('fields'))
+        has_prompt = bool(config.get('prompt') or config.get('scrape_prompt'))
+        if job.mode == ScrapeJob.Mode.PROMPT:
+            if not (has_prompt or has_selectors):
+                return Response(
+                    {'error': 'Prompt-mode job needs a "prompt" (or cached selectors)'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif not has_selectors:
             return Response(
                 {'error': 'Job has no selectors configured'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Execute job
-        task = execute_scrape_job.delay(job.id)
-
-        # Create pending job run
+        # Create the pending run first, then hand its id to the task so we don't
+        # end up with two JobRun rows for one execution.
         job_run = JobRun.objects.create(
             job=job,
-            status=JobRun.Status.PENDING,
-            task_id=task.id
+            status=JobRun.Status.PENDING
         )
+        task = execute_scrape_job.delay(job.id, run_id=job_run.id)
+        job_run.task_id = task.id
+        job_run.save(update_fields=['task_id'])
 
         return Response({
             'message': 'Job execution started',
@@ -313,7 +327,9 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
         for item in items:
             row = {
                 'ID': item.id,
-                'Created At': item.created_at,
+                # openpyxl can't write tz-aware datetimes; drop tzinfo (converting
+                # to local time first) so it stays a real Excel date cell.
+                'Created At': timezone.localtime(item.created_at).replace(tzinfo=None),
                 'Source URL': item.source_url
             }
             row.update(item.data)
@@ -479,6 +495,112 @@ class AISchemaGenerationView(generics.GenericAPIView):
             'message': 'AI schema generation started',
             'task_id': task.id
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class DataDestinationViewSet(viewsets.ModelViewSet):
+    """Manage a job's external data destinations (Postgres / Sheets / Webhook)."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = DataDestinationSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['job', 'dest_type', 'enabled']
+
+    def get_queryset(self):
+        return DataDestination.objects.filter(
+            job__user=self.request.user
+        ).select_related('job')
+
+    @action(detail=True, methods=['post'])
+    def test(self, request, pk=None):
+        """Send a single synthetic row to verify the destination is reachable."""
+        from .destinations import get_destination
+
+        dest = self.get_object()
+        handler = get_destination(dest.dest_type, dest.config)
+        columns = ['_test']
+        rows = [{'_test': 'super_scraper connectivity test'}]
+        try:
+            result = handler.deliver(columns, rows)
+            return Response({
+                'success': result.success,
+                'rows_delivered': result.rows_delivered,
+                'error': result.error,
+                'detail': result.detail,
+            }, status=status.HTTP_200_OK if result.success else status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'success': False, 'error': str(e)},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+
+class SnapshotView(generics.GenericAPIView):
+    """
+    Render a page and return a screenshot + selectable element map for the
+    visual selector UI.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = SnapshotSerializer
+
+    def post(self, request):
+        import asyncio
+        from .visual import snapshot
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        url = serializer.validated_data['url']
+        use_js = serializer.validated_data['use_js_rendering']
+
+        try:
+            result = asyncio.run(snapshot(url, use_js_rendering=use_js))
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Snapshot failed for {url}: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+
+class InferSelectorsView(generics.GenericAPIView):
+    """
+    Build a selector schema from the elements the user clicked, then return
+    sample rows extracted with that schema.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = InferSelectorsSerializer
+
+    def post(self, request):
+        import asyncio
+        from .visual import build_selectors
+        from .scraping_engine import SelectorTester
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        url = serializer.validated_data['url']
+        fields = serializer.validated_data['fields']
+        container = serializer.validated_data.get('container') or None
+        use_js = serializer.validated_data['use_js_rendering']
+
+        # Fetch the page once, then infer the repeating container against the real
+        # DOM and sample rows from that same HTML (one render, not two).
+        try:
+            html = asyncio.run(SelectorTester.fetch_html(url, use_js_rendering=use_js))
+        except Exception as e:
+            logger.error(f"Selector page fetch failed for {url}: {e}", exc_info=True)
+            html = None
+
+        selectors = build_selectors(fields, container=container, html=html)
+
+        if html:
+            try:
+                sample = SelectorTester.sample_from_html(html, selectors, url)
+            except Exception as e:
+                logger.error(f"Selector sampling failed for {url}: {e}", exc_info=True)
+                sample = {'success': False, 'error': str(e), 'items': []}
+        else:
+            sample = {'success': False, 'error': 'Failed to fetch page', 'items': []}
+
+        return Response({'selectors': selectors, 'sample': sample})
 
 
 class TaskStatusView(generics.GenericAPIView):

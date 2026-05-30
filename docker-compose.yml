@@ -1,9 +1,7 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     container_name: scraper_db
     environment:
       POSTGRES_DB: scraper_db
@@ -23,7 +21,7 @@ services:
 
   # Redis for Celery
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: scraper_redis
     ports:
       - "6379:6379"
@@ -60,6 +58,12 @@ services:
       - DEBUG=True
       - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,backend
       - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
+      # AI API keys are loaded from backend/.env by Django (load_dotenv). They are
+      # intentionally NOT set here so empty compose values can't shadow them.
+      # Models hardcoded so they win over any stale value in the root/backend .env.
+      # Cost-aware: cheap flash-lite for high-volume per-page extraction, flash for planning.
+      - DEFAULT_AI_MODEL=gemini-2.5-flash-lite
+      - AI_PLANNER_MODEL=gemini-2.5-flash
     depends_on:
       db:
         condition: service_healthy
@@ -81,6 +85,19 @@ services:
       - DATABASE_URL=postgresql://scraper_user:scraper_pass@db:5432/scraper_db
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      # AI API keys are loaded from backend/.env by Django (load_dotenv). They are
+      # intentionally NOT set here so empty compose values can't shadow them.
+      # Models hardcoded so they win over any stale value in the root/backend .env.
+      # Cost-aware: cheap flash-lite for high-volume per-page extraction, flash for planning.
+      - DEFAULT_AI_MODEL=gemini-2.5-flash-lite
+      - AI_PLANNER_MODEL=gemini-2.5-flash
+    # Override the image HEALTHCHECK (which probes the HTTP port the worker doesn't serve)
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     depends_on:
       db:
         condition: service_healthy
@@ -96,6 +113,9 @@ services:
       dockerfile: Dockerfile
     container_name: scraper_celery_beat
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    # Beat serves no HTTP; disable the inherited image healthcheck (it probes :8000).
+    healthcheck:
+      disable: true
     volumes:
       - ./backend:/app
     environment:
@@ -117,6 +137,13 @@ services:
       dockerfile: Dockerfile
     container_name: scraper_flower
     command: celery -A config flower --port=5555
+    # Flower serves on 5555, not 8000 — point the healthcheck at the right port.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5555/')\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     ports:
       - "5555:5555"
     environment:
@@ -125,6 +152,26 @@ services:
     depends_on:
       - redis
       - celery_worker
+    networks:
+      - scraper_network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: scraper_frontend
+    command: npm run dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      # Browser-side calls hit the host-published backend port.
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000/api
+    depends_on:
+      - backend
     networks:
       - scraper_network
 

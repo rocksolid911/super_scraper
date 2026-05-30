@@ -3,7 +3,7 @@ Scraper serializers.
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain
+from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
 
 User = get_user_model()
 
@@ -119,10 +119,11 @@ class CreateScrapeJobSerializer(serializers.ModelSerializer):
     class Meta:
         model = ScrapeJob
         fields = [
-            'name', 'description', 'mode', 'configuration',
+            'id', 'name', 'description', 'mode', 'status', 'configuration',
             'respect_robots_txt', 'use_js_rendering',
             'max_pages', 'max_depth', 'rate_limit'
         ]
+        read_only_fields = ['id', 'status']
 
     def validate_configuration(self, value):
         """Validate configuration has required fields."""
@@ -207,6 +208,28 @@ class AISchemaGenerationSerializer(serializers.Serializer):
     use_js_rendering = serializers.BooleanField(default=False)
 
 
+class SnapshotSerializer(serializers.Serializer):
+    """Request to render a page for visual selection."""
+    url = serializers.URLField()
+    use_js_rendering = serializers.BooleanField(default=True)
+
+
+class InferSelectorsSerializer(serializers.Serializer):
+    """Request to infer a selector schema from clicked elements."""
+    url = serializers.URLField()
+    fields = serializers.ListField(child=serializers.DictField(), min_length=1)
+    container = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    use_js_rendering = serializers.BooleanField(default=True)
+
+    def validate_fields(self, value):
+        for f in value:
+            if not f.get('name') or not f.get('selector'):
+                raise serializers.ValidationError(
+                    "Each field needs a 'name' and a 'selector'."
+                )
+        return value
+
+
 class ExportDataSerializer(serializers.Serializer):
     """Serializer for data export request."""
     format = serializers.ChoiceField(
@@ -216,6 +239,39 @@ class ExportDataSerializer(serializers.Serializer):
     run_id = serializers.IntegerField(required=False)
     date_from = serializers.DateTimeField(required=False)
     date_to = serializers.DateTimeField(required=False)
+
+
+class DataDestinationSerializer(serializers.ModelSerializer):
+    """Serializer for a job's external data destinations."""
+
+    class Meta:
+        model = DataDestination
+        fields = [
+            'id', 'job', 'name', 'dest_type', 'config', 'enabled',
+            'last_delivery_at', 'last_status', 'last_error',
+            'total_rows_delivered', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'last_delivery_at', 'last_status', 'last_error',
+            'total_rows_delivered', 'created_at', 'updated_at'
+        ]
+
+    def validate(self, attrs):
+        # Validate the destination config eagerly so misconfig is caught at save time.
+        from .destinations import get_destination
+        dest_type = attrs.get('dest_type', getattr(self.instance, 'dest_type', None))
+        config = attrs.get('config', getattr(self.instance, 'config', {}))
+        try:
+            get_destination(dest_type, config).validate()
+        except ValueError as e:
+            raise serializers.ValidationError({'config': str(e)})
+        return attrs
+
+    def validate_job(self, job):
+        request = self.context.get('request')
+        if request and job.user_id != request.user.id:
+            raise serializers.ValidationError("You do not own this job.")
+        return job
 
 
 class WebsiteDomainSerializer(serializers.ModelSerializer):
