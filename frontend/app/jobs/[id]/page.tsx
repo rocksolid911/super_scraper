@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
+import Schedule from '@/components/Schedule';
+import Destinations from '@/components/Destinations';
 import {
   getJob, jobRuns, jobItems, runJob, getToken, exportUrl,
   Job, JobRun, ScrapedItem, ApiError,
@@ -117,6 +119,11 @@ export default function JobDetail() {
             </div>
           </div>
           {error && <div className="error">{error}</div>}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, alignItems: 'start' }}>
+          {job && <Schedule job={job} onUpdated={load} />}
+          <Destinations jobId={id} />
         </div>
 
         <div className="card">
