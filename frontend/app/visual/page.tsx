@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
 import {
-  snapshot, inferSelectors, createJob, getToken, mediaUrl,
+  snapshot, inferSelectors, createJob, getToken, mediaUrl, parsePages,
   SnapshotResult, SnapshotElement, FieldDef, InferResult, ApiError,
 } from '@/lib/api';
 
@@ -27,6 +27,7 @@ export default function VisualSelector() {
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState('');
   const [respectRobots, setRespectRobots] = useState(true);
+  const [pages, setPages] = useState('1');
   const [error, setError] = useState('');
 
   if (typeof window !== 'undefined' && !getToken()) {
@@ -95,6 +96,7 @@ export default function VisualSelector() {
         configuration: { urls: [url], selectors: preview.selectors },
         use_js_rendering: useJs,
         respect_robots_txt: respectRobots,
+        max_pages: parsePages(pages),
       });
       router.push(`/jobs/${job.id}`);
     } catch (err) {
@@ -241,6 +243,13 @@ export default function VisualSelector() {
                     <input type="checkbox" checked={respectRobots} onChange={(e) => setRespectRobots(e.target.checked)} style={{ width: 'auto' }} />
                     <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
                   </label>
+                  <label style={{ marginTop: 10 }}>Pages to scrape</label>
+                  <input
+                    value={pages}
+                    onChange={(e) => setPages(e.target.value)}
+                    placeholder='1, 2, 3… or "all"'
+                    style={{ maxWidth: 220 }}
+                  />
                   <div style={{ marginTop: 12 }}>
                     <button onClick={save} disabled={saving || sampleItems.length === 0}>
                       {saving ? 'Saving…' : 'Save as job'}

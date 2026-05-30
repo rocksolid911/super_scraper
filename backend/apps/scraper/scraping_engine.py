@@ -4,13 +4,20 @@ Web scraping engine using Crawl4AI and Playwright.
 import logging
 import time
 from typing import Dict, List, Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qsl, urlencode
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 from django.conf import settings
 from apps.core.utils import generate_unique_hash, extract_domain, RateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling so an "all pages" request (or a misbehaving next-link loop) can never
+# run away. Tune via settings if needed.
+SAFETY_MAX_PAGES = 200
+
+# Anchor text that commonly denotes the "next page" control.
+_NEXT_TEXTS = {'next', 'next page', 'next »', '›', '»', '→', 'older', 'older posts'}
 
 
 class ScrapingEngine:
@@ -318,62 +325,123 @@ class ScrapingEngine:
 
         return links
 
+    def discover_next_url(
+        self,
+        html: str,
+        current_url: str,
+        pagination_config: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """
+        Find the next page's URL with no user-supplied selector.
+
+        Order of attempts:
+          1. An explicit ``pagination_config`` (back-compat / power users).
+          2. ``rel="next"`` on a <link> or <a> (the semantic, most reliable signal).
+          3. An anchor whose visible text / aria-label reads like a "next" control.
+          4. Incrementing a ``page`` (or ``p``/``pn``) query parameter on the URL.
+
+        Returns an absolute URL, or ``None`` when no next page can be inferred.
+        """
+        if pagination_config:
+            links = self.find_pagination_links(html, pagination_config, current_url, current_url)
+            return links[0] if links else None
+
+        soup = BeautifulSoup(html, 'lxml')
+
+        # 2. rel="next"
+        rel_next = soup.select_one('link[rel~="next"], a[rel~="next"]')
+        if rel_next and rel_next.get('href'):
+            return urljoin(current_url, rel_next['href'])
+
+        # 3. Anchor that looks like a "next" control.
+        for a in soup.find_all('a'):
+            href = a.get('href')
+            if not href:
+                continue
+            label = (a.get_text() or '').strip().lower()
+            aria = (a.get('aria-label') or '').strip().lower()
+            if label in _NEXT_TEXTS or 'next' in aria:
+                return urljoin(current_url, href)
+
+        # 4. Increment a page-number query parameter.
+        return self._increment_page_param(current_url)
+
+    @staticmethod
+    def _increment_page_param(url: str) -> Optional[str]:
+        """Return ``url`` with its page parameter bumped by one (page 1 assumed absent)."""
+        parsed = urlparse(url)
+        params = parse_qsl(parsed.query, keep_blank_values=True)
+        page_keys = ('page', 'pageno', 'pagenumber', 'pn', 'p')
+        new_params = []
+        found = False
+        for k, v in params:
+            if k.lower() in page_keys and v.isdigit():
+                new_params.append((k, str(int(v) + 1)))
+                found = True
+            else:
+                new_params.append((k, v))
+        if not found:
+            # No explicit page param -> page 1 is implicit, so the next page is 2.
+            new_params.append(('page', '2'))
+        new_query = urlencode(new_params)
+        return parsed._replace(query=new_query).geturl()
+
     async def scrape_url(
         self,
         url: str,
         selectors: Dict[str, Any],
         pagination_config: Optional[Dict[str, Any]] = None,
-        max_pages: int = 100
+        max_pages: int = 1
     ) -> Dict[str, Any]:
         """
-        Scrape a URL with pagination support.
+        Scrape a URL, following pagination across up to ``max_pages`` pages.
 
         Args:
             url: Starting URL
             selectors: Data extraction selectors
-            pagination_config: Pagination configuration
-            max_pages: Maximum number of pages to scrape
+            pagination_config: Optional explicit pagination config (else auto-detect)
+            max_pages: Page budget. ``1`` = single page (no pagination); ``N`` = up to
+                N pages; ``0`` = all pages (bounded by ``SAFETY_MAX_PAGES``).
 
         Returns:
             Dictionary with scraped items and stats
         """
+        # 0 ("all") -> safety ceiling; anything above the ceiling is clamped to it.
+        effective_max = SAFETY_MAX_PAGES if max_pages in (0, None) else min(max_pages, SAFETY_MAX_PAGES)
+
         all_items = []
         pages_visited = 0
-        urls_to_visit = [url]
+        current_url: Optional[str] = url
         visited_urls = set()
 
         try:
-            while urls_to_visit and pages_visited < max_pages:
-                current_url = urls_to_visit.pop(0)
-
+            while current_url and pages_visited < effective_max:
                 if current_url in visited_urls:
-                    continue
+                    break  # looped back on ourselves -> stop
 
                 logger.info(f"Scraping: {current_url}")
-
-                # Fetch page
                 html = await self.fetch_page(current_url)
                 if not html:
-                    continue
+                    break
 
                 visited_urls.add(current_url)
                 pages_visited += 1
 
-                # Extract data
                 items = self.extract_data(html, selectors, current_url)
-                all_items.extend(items)
-
                 logger.info(f"Extracted {len(items)} items from {current_url}")
 
-                # Find pagination links
-                if pagination_config and pages_visited < max_pages:
-                    pagination_links = self.find_pagination_links(
-                        html,
-                        pagination_config,
-                        current_url,
-                        current_url
-                    )
-                    urls_to_visit.extend(pagination_links)
+                # End-of-list guard: a follow-on page with no rows means we've run past
+                # the last real page (e.g. ?page=99). Don't append, don't continue.
+                if pages_visited > 1 and not items:
+                    logger.info(f"No items on {current_url}; stopping pagination")
+                    break
+                all_items.extend(items)
+
+                # Discover the next page only if we still have budget left.
+                if pages_visited < effective_max:
+                    current_url = self.discover_next_url(html, current_url, pagination_config)
+                else:
+                    current_url = None
 
             return {
                 'items': all_items,

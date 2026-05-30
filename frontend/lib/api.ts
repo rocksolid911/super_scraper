@@ -1,6 +1,17 @@
 // Minimal API client for the super_scraper DRF backend.
 // Tokens live in localStorage; all calls attach the JWT access token.
 
+// "Pages to scrape" maps to max_pages: a number N (>=1), or "all" -> 0 (all pages).
+export function parsePages(input: string): number {
+  const s = (input || '').trim().toLowerCase();
+  if (s === 'all' || s === '0') return 0;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+export function formatPages(max_pages?: number): string {
+  return max_pages === 0 ? 'all' : String(max_pages ?? 1);
+}
+
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000/api';
 
@@ -20,6 +31,7 @@ export type Job = {
   created_at: string;
   respect_robots_txt?: boolean;
   use_js_rendering?: boolean;
+  max_pages?: number;
   is_scheduled?: boolean;
   schedule_config?: Record<string, any>;
   next_run_at?: string | null;
@@ -193,7 +205,7 @@ export async function runJob(id: number): Promise<{ run_id: number; task_id: str
 
 export async function updateJob(
   id: number,
-  patch: Partial<{ name: string; respect_robots_txt: boolean; use_js_rendering: boolean }>,
+  patch: Partial<{ name: string; respect_robots_txt: boolean; use_js_rendering: boolean; max_pages: number }>,
 ): Promise<Job> {
   return request(`/scraper/jobs/${id}/`, { method: 'PATCH', body: JSON.stringify(patch) });
 }

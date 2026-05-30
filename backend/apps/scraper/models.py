@@ -67,7 +67,9 @@ class ScrapeJob(SoftDeleteModel):
     # Settings
     respect_robots_txt = models.BooleanField(default=True)
     use_js_rendering = models.BooleanField(default=False)
-    max_pages = models.IntegerField(default=100)
+    # Pages to scrape: 1 = single page (default), N = up to N pages, 0 = all pages
+    # (bounded by SAFETY_MAX_PAGES in the engine).
+    max_pages = models.IntegerField(default=1)
     max_depth = models.IntegerField(default=3)
     rate_limit = models.FloatField(
         default=1.0,

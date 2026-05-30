@@ -6,7 +6,7 @@ import TopBar from '@/components/TopBar';
 import Schedule from '@/components/Schedule';
 import Destinations from '@/components/Destinations';
 import {
-  getJob, jobRuns, jobItems, runJob, updateJob, getToken, exportUrl,
+  getJob, jobRuns, jobItems, runJob, updateJob, getToken, exportUrl, parsePages, formatPages,
   Job, JobRun, ScrapedItem, ApiError,
 } from '@/lib/api';
 
@@ -88,6 +88,17 @@ export default function JobDetail() {
     }
   }
 
+  async function savePages(input: string) {
+    setError('');
+    try {
+      const updated = await updateJob(id, { max_pages: parsePages(input) });
+      setJob(updated);
+    } catch (err) {
+      const e = err as ApiError;
+      setError(typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail));
+    }
+  }
+
   async function doExport(fmt: 'csv' | 'xlsx' | 'json') {
     const res = await fetch(exportUrl(id), {
       method: 'POST',
@@ -138,6 +149,17 @@ export default function JobDetail() {
             />
             <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
           </label>
+          <div className="row" style={{ marginTop: 8, width: 'auto', gap: 8 }}>
+            <span>Pages to scrape:</span>
+            <input
+              defaultValue={formatPages(job?.max_pages)}
+              key={job?.max_pages}
+              onBlur={(e) => savePages(e.target.value)}
+              placeholder='1 or "all"'
+              style={{ maxWidth: 100 }}
+            />
+            <span className="muted" style={{ fontSize: 12 }}>number, or “all”</span>
+          </div>
           {error && <div className="error">{error}</div>}
         </div>
 
