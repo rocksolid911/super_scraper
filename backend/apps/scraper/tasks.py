@@ -90,6 +90,17 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
             total_pages = len(urls_visited)
             agent_errors = agent_out.get('errors', [])
             engine_label = 'langgraph-agent'
+
+            # Cost optimization: if the agent extracted a clean single-page list,
+            # derive a CSS schema, verify it reproduces the rows, and cache it so
+            # future runs use the cheap deterministic path and skip the LLM entirely.
+            try:
+                _maybe_cache_css_schema(
+                    job, agent_out, urls,
+                    job.use_js_rendering, settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT']
+                )
+            except Exception as e:
+                logger.warning(f"CSS schema caching skipped for job {job_id}: {e}")
         else:
             if not has_selectors:
                 raise ValueError("No selectors configured for this job")
@@ -124,6 +135,14 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
 
             all_items, total_pages, urls_visited = asyncio.run(_scrape_all())
             engine_label = 'playwright' if job.use_js_rendering else 'requests'
+
+            # Self-heal: a cached CSS schema that suddenly returns nothing is stale
+            # (site changed). Drop it so the next run re-derives via the agent.
+            if config.get('css_cached') and len(all_items) == 0:
+                logger.warning(f"Cached CSS schema for job {job_id} returned 0 rows; clearing cache")
+                job.configuration.pop('selectors', None)
+                job.configuration.pop('css_cached', None)
+                job.save(update_fields=['configuration', 'updated_at'])
 
         # Save scraped items
         items_created = 0
@@ -389,6 +408,56 @@ def generate_ai_schema_task(
         }
     finally:
         asyncio.run(engine.close_browser())
+
+
+def _maybe_cache_css_schema(job, agent_out, urls, use_js, timeout):
+    """
+    Derive a CSS schema from the agent's plan and cache it on the job so future runs
+    skip the LLM. Only caches cheap, reproducible single-page list extractions, and
+    only after verifying the schema reproduces a comparable number of rows.
+    """
+    from .scraping_engine import SelectorTester
+
+    plan = agent_out.get('plan') or {}
+    rows = agent_out.get('rows') or []
+
+    # Only single-page lists are safely reproducible with static CSS (detail-link
+    # following needs the agent's navigation).
+    if not plan.get('is_list') or plan.get('follow_detail_links'):
+        return
+    container = plan.get('container_selector')
+    if not container:
+        return
+
+    fields = {}
+    for f in plan.get('fields', []):
+        sel = f.get('css_selector')
+        if not sel:
+            return  # incomplete CSS -> don't cache
+        fields[f['name']] = {'selector': sel, 'attr': f.get('attr', 'text'), 'type': 'string'}
+    if not fields:
+        return
+
+    candidate = {'container': container, 'fields': fields}
+
+    # Verify before trusting: the CSS schema must reproduce most of the agent's rows.
+    result = asyncio.run(
+        SelectorTester.test_selectors(urls[0], candidate, use_js_rendering=use_js)
+    )
+    found = result.get('total_found', 0) if result.get('success') else 0
+    if found >= max(1, int(0.6 * len(rows))):
+        job.configuration['selectors'] = candidate
+        job.configuration['css_cached'] = True
+        job.save(update_fields=['configuration', 'updated_at'])
+        logger.info(
+            f"Cached CSS schema for job {job.id} ({found} rows verified); "
+            f"future runs skip the LLM"
+        )
+    else:
+        logger.info(
+            f"CSS schema not cached for job {job.id}: only {found} CSS rows "
+            f"vs {len(rows)} agent rows"
+        )
 
 
 def deliver_run_to_destinations(job, job_run) -> list:
