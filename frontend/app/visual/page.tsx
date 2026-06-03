@@ -250,6 +250,9 @@ export default function VisualSelector() {
                     placeholder='1, 2, 3… or "all"'
                     style={{ maxWidth: 220 }}
                   />
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    Follows the “next” link automatically across pages. Use “all” to paginate to the end.
+                  </span>
                   <div style={{ marginTop: 12 }}>
                     <button onClick={save} disabled={saving || sampleItems.length === 0}>
                       {saving ? 'Saving…' : 'Save as job'}

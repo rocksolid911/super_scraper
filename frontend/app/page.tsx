@@ -76,6 +76,12 @@ export default function Dashboard() {
             <button className="secondary" onClick={() => router.push('/discover')}>
               🧭 Discover
             </button>
+            <button className="secondary" onClick={() => router.push('/monitor')}>
+              🔔 Monitor
+            </button>
+            <button className="secondary" onClick={() => router.push('/recipes')}>
+              📑 Recipes
+            </button>
             <button className="secondary" onClick={() => router.push('/visual')}>
               🖱 Visual selector
             </button>

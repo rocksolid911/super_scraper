@@ -1,12 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
 import {
   discoverSections, discoverItems, createJob, createRecipe, snapshot, mediaUrl, getToken,
   Section, DiscoverItem, SnapshotResult, ApiError,
 } from '@/lib/api';
+
+const DISCOVER_KEY = 'ss_discover_state';
 
 export default function Discover() {
   const router = useRouter();
@@ -35,6 +37,46 @@ export default function Discover() {
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewShot, setPreviewShot] = useState<SnapshotResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
+
+  // Persist the wizard across navigation so a round-trip to the dashboard doesn't
+  // wipe the discovered sections, entries, and selection.
+  const restored = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVER_KEY);
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s.url) setUrl(s.url);
+        if (typeof s.useJs === 'boolean') setUseJs(s.useJs);
+        if (typeof s.respectRobots === 'boolean') setRespectRobots(s.respectRobots);
+        if (s.sections) setSections(s.sections);
+        if (s.listingUrl) setListingUrl(s.listingUrl);
+        if (s.sectionLabel) setSectionLabel(s.sectionLabel);
+        if (s.items) setItems(s.items);
+        if (Array.isArray(s.selected)) setSelected(new Set(s.selected));
+        if (s.name) setName(s.name);
+        if (s.prompt) setPrompt(s.prompt);
+      }
+    } catch {
+      /* ignore */
+    }
+    restored.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!restored.current) return; // don't clobber saved state on the first render
+    try {
+      localStorage.setItem(
+        DISCOVER_KEY,
+        JSON.stringify({
+          url, useJs, respectRobots, sections, listingUrl, sectionLabel,
+          items, selected: Array.from(selected), name, prompt,
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [url, useJs, respectRobots, sections, listingUrl, sectionLabel, items, selected, name, prompt]);
 
   function closePreview() {
     setPreviewUrl('');
@@ -197,7 +239,12 @@ export default function Discover() {
       <div className="container">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h1 style={{ margin: 0 }}>Discover &amp; scrape</h1>
-          <button className="secondary" onClick={() => router.push('/')}>← Dashboard</button>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="secondary" onClick={() => { reset(); setUrl(''); setName(''); setPrompt(''); }}>
+              Start over
+            </button>
+            <button className="secondary" onClick={() => router.push('/')}>← Dashboard</button>
+          </div>
         </div>
         <p className="notice" style={{ margin: '6px 0 16px' }}>
           Paste a site URL, see what sections it has, pick a section, then choose the
