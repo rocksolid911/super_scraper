@@ -247,9 +247,34 @@ chars). Preview (scroll off) → 14s on books.toscrape.com. Snapshot of a myneta
 
 ---
 
+### Phase 10 — Hardening & UX polish ✅
+
+- **Selector hardening:** `normalize_css_selector` rewrites jQuery-style `:contains(...)` to
+  soupsieve's `:-soup-contains(...)` before `select()`, applied to container + field selectors.
+- **Destination secret encryption at rest:** `apps/core/crypto.py` (Fernet, keyed off
+  `SECRET_KEY`/`FIELD_ENCRYPTION_KEY`). Secret config keys are stored with an `enc:` prefix
+  (idempotent, backward-compatible with plaintext rows; no-op if `cryptography` missing).
+  `DataDestination.save()` encrypts; `decrypted_config` feeds handlers; serializer decrypts on
+  read; migration 0006 encrypts existing rows. **Verified:** DB stores `enc:` ciphertext,
+  `decrypted_config` returns plaintext.
+- **Discover wizard state** persists to localStorage (sections/entries/selection survive
+  navigation); Start-over button clears it.
+- **Recipes page** (`/recipes`): list, run-as-job, delete saved recipes.
+- **Monitor flow** (`/monitor`): create + schedule + enable change-alerts in one step.
+  **Verified:** create 201 → schedule 200 → alerts 200.
+- **Visual-mode pagination** hint surfaced (pagination already followed "next" via the CSS path).
+- Default fetch timeout default raised to 90s in committed settings.
+
+---
+
 ## Commit history (this effort)
 
 ```
+1197c5c feat(frontend): recipes page, monitor flow, persisted discover wizard, visual paging hint
+b00b0c7 feat(backend): encrypt destination secrets at rest; harden :contains selectors
+d8a9cf8 docs: document discovery, monitoring, preview, and reliability work
+0bd4ada feat(frontend): discovery wizard, alerts panel, run-diff view, persisted output preview
+e73359e feat(scraper): on-site discovery, change monitoring, output preview, fetch reliability
 8bd6ecb feat(frontend): scheduling and destinations management UI
 48e0f99 feat(backend): cache derived CSS schema after agent runs to skip the LLM
 eb33248 feat(frontend): visual click-to-select UI
@@ -266,19 +291,16 @@ ef808e1 feat(frontend): Next.js thin-slice UI (auth, jobs, run, results, export)
 
 - **Google Sheets** delivery is implemented but not live-tested (needs a service-account JSON with edit access).
 - **Scheduling** beat loop (`check_scheduled_jobs`, every 5 min) is wired and the UI works, but a full scheduled re-run wasn't observed over real time.
-- The planner occasionally emits CSS `:contains(...)` → soupsieve deprecation warning (`:-soup-contains`). Harmless today; hardening pending.
-- **Visual mode** has no pagination/detail-link following (the NL agent does).
-- **Secrets** (destination DSNs, Sheets creds) are stored in plaintext JSON on `DataDestination.config` — encrypt at rest before production.
+- **Visual mode** has no detail-link following (the NL agent does); pagination across pages works.
+- **Secrets API exposure:** secrets are now encrypted at rest, but the destination serializer still returns decrypted values to the owner (so the edit UI works). Masking in API responses is a further hardening step.
 - Docker-on-Windows: newly added frontend route/component files need a `docker compose restart frontend` (file-watcher gap); edits to existing files hot-reload.
-- **Discover page state** (selected entries, section choice) resets on navigation — only the preview result persists.
-- Nothing pushed to a remote yet; no PR.
+- Nothing committed beyond `8bd6ecb` is on a PR yet (commits pushed to `initial-run-testing`).
 
 ## Suggested next steps
 
-1. Push `initial-run-testing` and open a PR.
+1. Open a PR for `initial-run-testing`.
 2. Live-test Google Sheets with a real service account.
-3. Harden selectors (`:contains` → `:-soup-contains`).
-4. Visual-mode pagination + multi-page; destination secret encryption.
-5. Persist Discover page selection state across navigation (same pattern as PreviewOutput).
-6. Observability: surface LangSmith traces (already supported via env).
-7. Monitoring bundle (future scope — see Section 16 of the project guide): conversational refinement, web-search universal scraper.
+3. Visual-mode detail-link following (parity with the NL agent).
+4. Mask secrets in destination API responses (write-only config).
+5. Observability: surface LangSmith traces (already supported via env).
+6. Future scope (Section 16 of the project guide): conversational refinement, web-search universal scraper.
