@@ -16,7 +16,7 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
+from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination, ScrapeRecipe
 from .serializers import (
     ScrapeJobSerializer,
     ScrapeJobListSerializer,
@@ -31,6 +31,8 @@ from .serializers import (
     SnapshotSerializer,
     InferSelectorsSerializer,
     DataDestinationSerializer,
+    DiscoverRequestSerializer,
+    ScrapeRecipeSerializer,
 )
 from .tasks import (
     execute_scrape_job,
@@ -354,6 +356,31 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
 
         return response
 
+    @action(detail=True, methods=['post'])
+    def test_alert(self, request, pk=None):
+        """Send a sample change alert to the job's configured channels."""
+        from .notifications import send_change_alert
+
+        job = self.get_object()
+        if not (job.notify_config or {}).get('channels'):
+            return Response(
+                {'error': 'No alert channels configured on this job.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        sample_change = {
+            'first_run': False, 'changed': True,
+            'added': 1, 'removed': 0, 'unchanged': 0,
+            'added_sample': ['example=a new row'], 'removed_sample': [],
+        }
+        last_run = job.runs.order_by('-created_at').first()
+        results = send_change_alert(job, last_run, sample_change)
+        ok = all(r.get('success') for r in results) if results else False
+        return Response(
+            {'success': ok, 'results': results},
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST
+        )
+
     @action(detail=False, methods=['get'])
     def statistics(self, request):
         """Get overall statistics for user's jobs."""
@@ -601,6 +628,128 @@ class InferSelectorsView(generics.GenericAPIView):
             sample = {'success': False, 'error': 'Failed to fetch page', 'items': []}
 
         return Response({'selectors': selectors, 'sample': sample})
+
+
+class DiscoverSectionsView(generics.GenericAPIView):
+    """
+    Map a site's header/navigation into a list of named sections (map_site).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = DiscoverRequestSerializer
+
+    def post(self, request):
+        import asyncio
+        from .discovery import discover_sections
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        url = serializer.validated_data['url']
+        use_js = serializer.validated_data['use_js_rendering']
+
+        try:
+            result = asyncio.run(discover_sections(url, use_js_rendering=use_js))
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Section discovery failed for {url}: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+
+class DiscoverItemsView(generics.GenericAPIView):
+    """
+    Enumerate the repeating entries on a section/listing page (list_items).
+
+    The returned list doubles as the live preview of what a scrape would yield.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = DiscoverRequestSerializer
+
+    def post(self, request):
+        import asyncio
+        from .discovery import discover_items
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        url = serializer.validated_data['url']
+        use_js = serializer.validated_data['use_js_rendering']
+
+        try:
+            result = asyncio.run(discover_items(url, use_js_rendering=use_js))
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Item discovery failed for {url}: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+
+class ScrapeRecipeViewSet(viewsets.ModelViewSet):
+    """Manage saved discovery selections (recipes) and materialise them into jobs."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ScrapeRecipeSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    ordering_fields = ['created_at', 'updated_at', 'name']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return ScrapeRecipe.objects.filter(user=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def create_job(self, request, pk=None):
+        """Build a fresh prompt-mode ScrapeJob from this recipe's selection."""
+        recipe = self.get_object()
+        urls = recipe.item_urls
+        if not urls:
+            return Response(
+                {'error': 'Recipe has no URLs to scrape.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        config = {'urls': urls, 'prompt': recipe.prompt}
+        if recipe.selectors:
+            config['selectors'] = recipe.selectors
+
+        job = ScrapeJob.objects.create(
+            user=request.user,
+            name=recipe.name,
+            mode=ScrapeJob.Mode.PROMPT,
+            configuration=config,
+            use_js_rendering=recipe.use_js_rendering,
+            respect_robots_txt=recipe.respect_robots_txt,
+        )
+        return Response(
+            ScrapeJobSerializer(job, context={'request': request}).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class PreviewScrapeView(generics.GenericAPIView):
+    """
+    Dry-run preview: dispatch a bounded extraction and return a task id to poll.
+    Returns up to 8 sample rows for a URL + prompt (or selectors) without persisting.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .tasks import preview_scrape_task
+
+        data = request.data
+        urls = data.get('urls') or ([data.get('url')] if data.get('url') else [])
+        urls = [u for u in urls if u]
+        if not urls:
+            return Response({'error': 'url(s) required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = {
+            'urls': urls,
+            'prompt': data.get('prompt'),
+            'selectors': data.get('selectors'),
+            'use_js_rendering': bool(data.get('use_js_rendering')),
+        }
+        task = preview_scrape_task.delay(payload)
+        return Response({'task_id': task.id}, status=status.HTTP_202_ACCEPTED)
 
 
 class TaskStatusView(generics.GenericAPIView):

@@ -64,6 +64,13 @@ class ScrapeJob(SoftDeleteModel):
     failed_runs = models.IntegerField(default=0)
     total_items_scraped = models.IntegerField(default=0)
 
+    # Change alerts: when on, a run whose scraped content differs from the previous
+    # run notifies the configured channels. ``notify_config`` shape:
+    # ``{"channels": [{"type": "slack"|"discord"|"webhook"|"email", "target": "...",
+    # "label": "..."}]}``.
+    notify_on_change = models.BooleanField(default=False)
+    notify_config = models.JSONField(default=dict, blank=True)
+
     # Settings
     respect_robots_txt = models.BooleanField(default=True)
     use_js_rendering = models.BooleanField(default=False)
@@ -156,6 +163,12 @@ class JobRun(TimeStampedModel):
         help_text='Detailed statistics about the run'
     )
 
+    # Content signature for change detection: {hashes: [...], previews: {hash: str}}.
+    # Server-side only (not serialized to the API) — used to diff this run against the
+    # previous one. Only populated for successful runs so a transient empty/failed run
+    # never becomes a baseline.
+    content_index = models.JSONField(default=dict, blank=True)
+
     # Celery task ID for tracking
     task_id = models.CharField(max_length=255, blank=True, null=True)
 
@@ -187,6 +200,11 @@ class JobRun(TimeStampedModel):
     def is_running(self):
         """Check if run is currently running."""
         return self.status in [self.Status.PENDING, self.Status.RUNNING]
+
+    @property
+    def change_summary(self):
+        """Run-to-run change detection result, if computed (see monitoring.py)."""
+        return (self.stats or {}).get('change', {})
 
 
 class ScrapedItem(TimeStampedModel):
@@ -292,6 +310,57 @@ class DataDestination(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.dest_type}) -> {self.job.name}"
+
+
+class ScrapeRecipe(TimeStampedModel):
+    """
+    A saved, reusable selection from the on-site discovery flow.
+
+    Captures what the user picked (a site, an optional section, and the chosen item
+    URLs) plus what to extract, so it can be re-run on demand or materialised into a
+    fresh :class:`ScrapeJob`. ``selectors`` optionally carries a derived CSS schema so
+    a re-run can skip the LLM, mirroring the job-level schema cache.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='scrape_recipes'
+    )
+    name = models.CharField(max_length=255)
+    source_url = models.URLField(max_length=2048)
+    section_label = models.CharField(max_length=255, blank=True)
+    prompt = models.TextField(blank=True)
+
+    # The entries the user multi-selected (list of {title, url}); the URLs become the
+    # job's start URLs when the recipe is materialised.
+    items = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Selected entries as a list of {title, url}.'
+    )
+    # Optional derived CSS schema so a re-run can skip the agent/LLM.
+    selectors = models.JSONField(default=dict, blank=True)
+
+    use_js_rendering = models.BooleanField(default=False)
+    respect_robots_txt = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'scrape_recipes'
+        verbose_name = 'Scrape Recipe'
+        verbose_name_plural = 'Scrape Recipes'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.user.email})"
+
+    @property
+    def item_urls(self):
+        """The selected entry URLs, falling back to the source URL when none picked."""
+        urls = [it.get('url') for it in (self.items or []) if it.get('url')]
+        return urls or ([self.source_url] if self.source_url else [])
 
 
 class WebsiteDomain(TimeStampedModel):

@@ -37,9 +37,11 @@ async def fetch_with_fallback(
     js: bool = True,
     timeout: int = 30,
     wait_for: Optional[str] = None,
+    scan_full_page: bool = True,
 ) -> FetchResult:
     """Fetch with the primary engine; fall back to Firecrawl on empty/failed result."""
-    result = await primary.fetch(url, js=js, timeout=timeout, wait_for=wait_for)
+    result = await primary.fetch(url, js=js, timeout=timeout, wait_for=wait_for,
+                                 scan_full_page=scan_full_page)
     if result.success and not result.is_empty:
         return result
 

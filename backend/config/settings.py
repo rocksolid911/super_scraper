@@ -194,7 +194,9 @@ SCRAPER_CONFIG = {
         'SCRAPER_USER_AGENT',
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ),
-    'DEFAULT_TIMEOUT': int(os.getenv('SCRAPER_TIMEOUT', '30')),
+    # Many real sites (e.g. large server-rendered listing pages) take 40-65s to
+    # respond, so default generously; override with SCRAPER_TIMEOUT.
+    'DEFAULT_TIMEOUT': int(os.getenv('SCRAPER_TIMEOUT', '90')),
     'MAX_RETRIES': int(os.getenv('SCRAPER_MAX_RETRIES', '3')),
     'RETRY_DELAY': int(os.getenv('SCRAPER_RETRY_DELAY', '5')),
     'RESPECT_ROBOTS_TXT': os.getenv('SCRAPER_RESPECT_ROBOTS_TXT', 'True') == 'True',

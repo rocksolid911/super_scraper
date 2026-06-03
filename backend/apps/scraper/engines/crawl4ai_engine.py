@@ -40,14 +40,19 @@ class Crawl4AIEngine(BaseEngine):
         return self._crawler
 
     def _run_config(self, *, timeout: int, wait_for: Optional[str] = None,
-                    extraction_strategy=None):
+                    extraction_strategy=None, scan_full_page: bool = True):
         from crawl4ai import CacheMode, CrawlerRunConfig
 
+        # Wait only for domcontentloaded (not networkidle, which can hang on heavy
+        # pages). ``scan_full_page`` auto-scrolls to trigger lazy/infinite-scroll
+        # content and is ON for real runs so no rows are missed; the quick preview
+        # turns it off for speed since it only samples the first page.
         return CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
             page_timeout=timeout * 1000,
+            wait_until='domcontentloaded',
             wait_for=wait_for,
-            scan_full_page=True,
+            scan_full_page=scan_full_page,
             remove_overlay_elements=True,
             extraction_strategy=extraction_strategy,
         )
@@ -59,10 +64,15 @@ class Crawl4AIEngine(BaseEngine):
         js: bool = True,
         timeout: int = 30,
         wait_for: Optional[str] = None,
+        scan_full_page: bool = True,
     ) -> FetchResult:
         try:
             crawler = await self._get_crawler()
-            result = await crawler.arun(url=url, config=self._run_config(timeout=timeout, wait_for=wait_for))
+            result = await crawler.arun(
+                url=url,
+                config=self._run_config(timeout=timeout, wait_for=wait_for,
+                                        scan_full_page=scan_full_page),
+            )
             links = []
             try:
                 internal = (result.links or {}).get('internal', [])
