@@ -19,6 +19,12 @@ const ACCESS_KEY = 'ss_access';
 const REFRESH_KEY = 'ss_refresh';
 const USER_KEY = 'ss_user';
 
+export type NotifyChannel = {
+  type: 'slack' | 'discord' | 'webhook' | 'email';
+  target: string;
+  label?: string;
+};
+
 export type Job = {
   id: number;
   name: string;
@@ -35,6 +41,8 @@ export type Job = {
   is_scheduled?: boolean;
   schedule_config?: Record<string, any>;
   next_run_at?: string | null;
+  notify_on_change?: boolean;
+  notify_config?: { channels: NotifyChannel[] };
 };
 
 export type ScheduleConfig =
@@ -55,6 +63,16 @@ export type Destination = {
   last_delivery_at?: string | null;
 };
 
+export type ChangeSummary = {
+  first_run?: boolean;
+  changed?: boolean;
+  added?: number;
+  removed?: number;
+  unchanged?: number;
+  added_sample?: string[];
+  removed_sample?: string[];
+};
+
 export type JobRun = {
   id: number;
   status: string;
@@ -63,6 +81,7 @@ export type JobRun = {
   duration_seconds: number | null;
   error_message?: string;
   created_at: string;
+  change_summary?: ChangeSummary;
 };
 
 export type ScrapedItem = {
@@ -205,9 +224,22 @@ export async function runJob(id: number): Promise<{ run_id: number; task_id: str
 
 export async function updateJob(
   id: number,
-  patch: Partial<{ name: string; respect_robots_txt: boolean; use_js_rendering: boolean; max_pages: number }>,
+  patch: Partial<{
+    name: string;
+    respect_robots_txt: boolean;
+    use_js_rendering: boolean;
+    max_pages: number;
+    notify_on_change: boolean;
+    notify_config: { channels: NotifyChannel[] };
+  }>,
 ): Promise<Job> {
   return request(`/scraper/jobs/${id}/`, { method: 'PATCH', body: JSON.stringify(patch) });
+}
+
+export async function testAlert(
+  id: number,
+): Promise<{ success: boolean; results: { type: string; label: string; success: boolean; error?: string }[] }> {
+  return request(`/scraper/jobs/${id}/test_alert/`, { method: 'POST' });
 }
 
 export async function jobRuns(id: number): Promise<JobRun[]> {
@@ -276,6 +308,121 @@ export async function inferSelectors(
     method: 'POST',
     body: JSON.stringify({ url, fields, container: container || null, use_js_rendering: useJs }),
   });
+}
+
+// --- Discovery (on-site map_site + list_items) ---
+export type Section = { label: string; url: string };
+export type DiscoverItem = { title: string; url: string };
+
+export type SectionsResult = {
+  success: boolean;
+  url: string;
+  sections: Section[];
+  total?: number;
+  error?: string;
+};
+
+export type ItemsResult = {
+  success: boolean;
+  url: string;
+  items: DiscoverItem[];
+  total?: number;
+  error?: string;
+};
+
+export async function discoverSections(url: string, useJs = false): Promise<SectionsResult> {
+  return request('/scraper/discover-sections/', {
+    method: 'POST',
+    body: JSON.stringify({ url, use_js_rendering: useJs }),
+  });
+}
+
+export async function discoverItems(url: string, useJs = false): Promise<ItemsResult> {
+  return request('/scraper/discover-items/', {
+    method: 'POST',
+    body: JSON.stringify({ url, use_js_rendering: useJs }),
+  });
+}
+
+// --- Output preview (dry run, no persistence) ---
+export type PreviewResult = {
+  success: boolean;
+  url?: string;
+  columns: string[];
+  rows: Record<string, any>[];
+  count?: number;
+  error?: string | null;
+};
+
+export async function previewScrape(payload: {
+  urls: string[];
+  prompt?: string;
+  use_js_rendering?: boolean;
+  selectors?: Record<string, any>;
+}): Promise<{ task_id: string }> {
+  return request('/scraper/preview/', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function taskStatus(
+  taskId: string,
+): Promise<{ status: string; ready: boolean; successful: boolean | null; result?: any; error?: string }> {
+  return request(`/scraper/task-status/${taskId}/`);
+}
+
+// Dispatch a preview and poll until the task finishes (or times out).
+export async function runPreview(
+  payload: { urls: string[]; prompt?: string; use_js_rendering?: boolean; selectors?: Record<string, any> },
+  { tries = 75, intervalMs = 2000 }: { tries?: number; intervalMs?: number } = {},
+): Promise<PreviewResult> {
+  const { task_id } = await previewScrape(payload);
+  for (let i = 0; i < tries; i++) {
+    const s = await taskStatus(task_id);
+    if (s.ready) {
+      if (s.successful && s.result) return s.result as PreviewResult;
+      return { success: false, columns: [], rows: [], error: s.error || 'Preview failed' };
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return { success: false, columns: [], rows: [], error: 'Preview timed out' };
+}
+
+// --- Recipes (saved discovery selections) ---
+export type Recipe = {
+  id: number;
+  name: string;
+  source_url: string;
+  section_label: string;
+  prompt: string;
+  items: DiscoverItem[];
+  selectors: Record<string, any>;
+  use_js_rendering: boolean;
+  respect_robots_txt: boolean;
+  item_urls: string[];
+  created_at: string;
+};
+
+export async function listRecipes(): Promise<Recipe[]> {
+  return unwrap<Recipe>(await request('/scraper/recipes/'));
+}
+
+export async function createRecipe(payload: {
+  name: string;
+  source_url: string;
+  section_label?: string;
+  prompt?: string;
+  items?: DiscoverItem[];
+  use_js_rendering?: boolean;
+  respect_robots_txt?: boolean;
+}): Promise<Recipe> {
+  return request('/scraper/recipes/', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function deleteRecipe(id: number): Promise<void> {
+  return request(`/scraper/recipes/${id}/`, { method: 'DELETE' });
+}
+
+export async function createJobFromRecipe(id: number): Promise<Job> {
+  return request(`/scraper/recipes/${id}/create_job/`, { method: 'POST' });
 }
 
 // --- Scheduling ---

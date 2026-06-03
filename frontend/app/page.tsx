@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
+import PreviewOutput from '@/components/PreviewOutput';
 import { listJobs, createJob, getToken, parsePages, Job, ApiError } from '@/lib/api';
 
 export default function Dashboard() {
@@ -71,9 +72,14 @@ export default function Dashboard() {
       <div className="container">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h1 style={{ margin: 0 }}>New scrape job</h1>
-          <button className="secondary" onClick={() => router.push('/visual')}>
-            🖱 Visual selector
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="secondary" onClick={() => router.push('/discover')}>
+              🧭 Discover
+            </button>
+            <button className="secondary" onClick={() => router.push('/visual')}>
+              🖱 Visual selector
+            </button>
+          </div>
         </div>
         <p className="notice" style={{ margin: '6px 0 16px' }}>
           Describe what you want in natural language below, or use the visual selector to click fields on a live page.
@@ -114,6 +120,13 @@ export default function Dashboard() {
             <span className="muted" style={{ fontSize: 12 }}>
               Number of pages to follow (auto-detects “next”). Use “all” to follow every page.
             </span>
+
+            <PreviewOutput
+              storageKey="dashboard"
+              urls={urls.split(/[\n,]+/).map((u) => u.trim()).filter(Boolean)}
+              prompt={prompt}
+              useJs={js}
+            />
 
             {error && <div className="error">{error}</div>}
             <div style={{ marginTop: 16 }}>
