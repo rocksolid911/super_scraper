@@ -542,7 +542,7 @@ class DataDestinationViewSet(viewsets.ModelViewSet):
         from .destinations import get_destination
 
         dest = self.get_object()
-        handler = get_destination(dest.dest_type, dest.config)
+        handler = get_destination(dest.dest_type, dest.decrypted_config)
         columns = ['_test']
         rows = [{'_test': 'super_scraper connectivity test'}]
         try:

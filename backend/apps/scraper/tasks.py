@@ -556,7 +556,7 @@ def deliver_run_to_destinations(job, job_run) -> list:
     results = []
     for dest in destinations:
         try:
-            handler = get_destination(dest.dest_type, dest.config)
+            handler = get_destination(dest.dest_type, dest.decrypted_config)
             result = handler.deliver(columns, rows)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Destination {dest.id} ({dest.dest_type}) failed: {e}", exc_info=True)

@@ -308,6 +308,19 @@ class DataDestination(TimeStampedModel):
             models.Index(fields=['job', 'enabled']),
         ]
 
+    def save(self, *args, **kwargs):
+        # Encrypt secret fields (DSN, tokens, creds, webhook URL) at rest. Idempotent
+        # via the ``enc:`` prefix, so re-saves don't double-encrypt.
+        from apps.core.crypto import encrypt_secrets
+        self.config = encrypt_secrets(self.config or {})
+        super().save(*args, **kwargs)
+
+    @property
+    def decrypted_config(self):
+        """Config with secret fields decrypted — use this when building a handler."""
+        from apps.core.crypto import decrypt_secrets
+        return decrypt_secrets(self.config or {})
+
     def __str__(self):
         return f"{self.name} ({self.dest_type}) -> {self.job.name}"
 

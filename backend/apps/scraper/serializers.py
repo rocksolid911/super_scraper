@@ -262,11 +262,25 @@ class DataDestinationSerializer(serializers.ModelSerializer):
             'total_rows_delivered', 'created_at', 'updated_at'
         ]
 
+    def to_representation(self, instance):
+        # Return decrypted secrets to the owner so the edit UI shows real values;
+        # at rest in the DB they remain encrypted.
+        data = super().to_representation(instance)
+        data['config'] = instance.decrypted_config
+        return data
+
     def validate(self, attrs):
         # Validate the destination config eagerly so misconfig is caught at save time.
+        # On a partial update the incoming config may be absent — fall back to the
+        # instance's *decrypted* config so validation sees real values, not ciphertext.
         from .destinations import get_destination
         dest_type = attrs.get('dest_type', getattr(self.instance, 'dest_type', None))
-        config = attrs.get('config', getattr(self.instance, 'config', {}))
+        if 'config' in attrs:
+            config = attrs['config']
+        elif self.instance is not None:
+            config = self.instance.decrypted_config
+        else:
+            config = {}
         try:
             get_destination(dest_type, config).validate()
         except ValueError as e:

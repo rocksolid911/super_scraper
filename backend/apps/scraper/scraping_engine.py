@@ -20,6 +20,18 @@ SAFETY_MAX_PAGES = 200
 _NEXT_TEXTS = {'next', 'next page', 'next »', '›', '»', '→', 'older', 'older posts'}
 
 
+def normalize_css_selector(selector: Optional[str]) -> Optional[str]:
+    """Rewrite jQuery-style ``:contains(...)`` to soupsieve's ``:-soup-contains(...)``.
+
+    The LLM planner occasionally emits ``:contains()`` (a jQuery extension); soupsieve
+    deprecated that spelling and now errors on it. This makes such selectors usable
+    again. ``:-soup-contains(`` is left untouched (no ``:contains(`` substring).
+    """
+    if not selector:
+        return selector
+    return selector.replace(':contains(', ':-soup-contains(')
+
+
 class ScrapingEngine:
     """
     Main scraping engine using Crawl4AI and Playwright.
@@ -307,7 +319,7 @@ class ScrapingEngine:
         items = []
 
         # Get container selector (for lists/tables)
-        container_selector = selectors.get('container')
+        container_selector = normalize_css_selector(selectors.get('container'))
         if container_selector:
             containers = soup.select(container_selector)
         else:
@@ -318,7 +330,7 @@ class ScrapingEngine:
             has_data = False
 
             for field_name, field_config in selectors.get('fields', {}).items():
-                selector = field_config.get('selector')
+                selector = normalize_css_selector(field_config.get('selector'))
                 attr = field_config.get('attr', 'text')
                 field_type = field_config.get('type', 'string')
 
