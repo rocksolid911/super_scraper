@@ -73,6 +73,18 @@ API client: `frontend/lib/api.ts`.
   new section to the *existing* file (unpack → edit XML → repack); never create a new docx.
   Check for a `~$…docx` Word lock file first.
 
+## Outstanding follow-ups (backlog)
+- **`README.md` is intentionally not maintained** — it still describes the old Flutter/GPT
+  stack. Do **not** update it; keep `docs/` and this file current instead.
+- **Secrets masking:** destination secrets are encrypted at rest but the serializer still
+  returns them decrypted to the owner (so the edit UI works). Make `config` write-only /
+  masked in responses as a hardening step.
+- **Visual mode** lacks detail-link following (the NL agent has it); pagination works.
+- **Google Sheets** delivery is built but not live-tested (needs a service-account JSON).
+- **Future scope** (project guide Section 16): conversational refinement (multi-turn,
+  needs a LangGraph checkpointer) and a web-search "universal" scraper (budget caps +
+  source-consent UI).
+
 ## Where things are documented
 - `docs/PROGRESS.md` — phase-by-phase log with per-file change tables (authoritative).
-- `docs/Super_Scraper_Project_Guide.docx` — full project guide (Sections 1–18).
+- `docs/Super_Scraper_Project_Guide.docx` — full project guide (Sections 1–19).
