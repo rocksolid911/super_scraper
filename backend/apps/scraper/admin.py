@@ -4,7 +4,9 @@ Scraper admin configuration.
 from django.contrib import admin
 from django.utils.html import format_html
 from django.urls import reverse
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
+from .models import (
+    ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination, ScrapeRecipe,
+)
 
 
 @admin.register(DataDestination)
@@ -20,6 +22,15 @@ class DataDestinationAdmin(admin.ModelAdmin):
         'last_delivery_at', 'last_status', 'last_error',
         'total_rows_delivered', 'created_at', 'updated_at'
     ]
+
+
+@admin.register(ScrapeRecipe)
+class ScrapeRecipeAdmin(admin.ModelAdmin):
+    """Admin configuration for ScrapeRecipe model."""
+    list_display = ['name', 'user', 'source_url', 'section_label', 'created_at']
+    list_filter = ['use_js_rendering', 'created_at']
+    search_fields = ['name', 'source_url', 'user__email']
+    readonly_fields = ['created_at', 'updated_at']
 
 
 @admin.register(ScrapeJob)

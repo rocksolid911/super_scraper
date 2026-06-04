@@ -82,7 +82,7 @@ _DOM_MAP_JS = r"""
 """
 
 
-async def snapshot(url: str, *, use_js_rendering: bool = True, timeout: int = 30) -> Dict[str, Any]:
+async def snapshot(url: str, *, use_js_rendering: bool = True, timeout: int = 60) -> Dict[str, Any]:
     """Render ``url`` and return a screenshot path + selectable element map."""
     from playwright.async_api import async_playwright
 
@@ -96,8 +96,10 @@ async def snapshot(url: str, *, use_js_rendering: bool = True, timeout: int = 30
         try:
             page = await browser.new_page(user_agent=settings.SCRAPER_CONFIG['DEFAULT_USER_AGENT'])
             page.set_default_timeout(timeout * 1000)
-            await page.goto(url, wait_until='networkidle')
-            await page.wait_for_timeout(800)
+            # domcontentloaded (not networkidle) so heavy pages whose network never
+            # goes idle still render; a short settle wait covers late content.
+            await page.goto(url, wait_until='domcontentloaded')
+            await page.wait_for_timeout(1200)
             dom = await page.evaluate(_DOM_MAP_JS)
             await page.screenshot(path=filepath, full_page=True)
         finally:

@@ -73,3 +73,7 @@ isort==5.13.2
 # WSGI server
 gunicorn==23.0.0
 uvicorn==0.34.0
+
+# At-rest encryption for stored destination secrets (usually present transitively;
+# pinned so it is guaranteed available).
+cryptography>=42.0.0

@@ -106,6 +106,12 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
             if not has_selectors:
                 raise ValueError("No selectors configured for this job")
 
+            # Per-job proxy override (a URL or list); otherwise the engine falls
+            # back to the global SCRAPER_CONFIG['PROXY_URLS'] pool.
+            job_proxy = config.get('proxy')
+            if isinstance(job_proxy, str):
+                job_proxy = [job_proxy]
+
             # Deterministic CSS extraction (visual mode / cached selectors), one
             # browser lifecycle per run instead of a new event loop per URL.
             engine = ScrapingEngine(
@@ -113,7 +119,8 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
                 respect_robots_txt=job.respect_robots_txt,
                 rate_limit=job.rate_limit,
                 timeout=settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT'],
-                max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES']
+                max_retries=settings.SCRAPER_CONFIG['MAX_RETRIES'],
+                proxies=job_proxy
             )
 
             async def _scrape_all():
@@ -207,7 +214,30 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
                     "No pages could be fetched (every URL failed to load or returned empty). "
                     "Check the URL(s) and try toggling 'Use JS rendering'."
                 )
+        elif items_created == 0 and agent_errors:
+            # Pages were visited but nothing was extracted *and* the agent hit errors
+            # (e.g. a fetch timeout) — surface that instead of a misleading empty success.
+            run_error_message = (
+                "No rows were extracted. The page may have failed to load in time or "
+                f"changed structure. Details: {str(agent_errors[0])[:300]}"
+            )
         run_succeeded = not run_error_message
+
+        # Change detection: index this run's content and diff it against the previous
+        # run. Only successful runs are indexed, so a transient empty/failed run never
+        # becomes a baseline that makes the next run look like a wholesale change.
+        change = {}
+        current_index = {}
+        if run_succeeded:
+            try:
+                from . import monitoring
+                current_index = monitoring.build_content_index(all_items)
+                prev_run = monitoring.previous_indexed_run(job, job_run)
+                change = monitoring.diff_indexes(
+                    current_index, prev_run.content_index if prev_run else None
+                )
+            except Exception as e:  # noqa: BLE001 - never fail a run over diffing
+                logger.warning(f"Change detection failed for job {job_id}: {e}")
 
         # Update job run
         job_run.status = JobRun.Status.SUCCESS if run_succeeded else JobRun.Status.FAILED
@@ -217,6 +247,7 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
         job_run.pages_visited = total_pages
         job_run.error_message = run_error_message
         job_run.errors_count = 0 if run_succeeded else 1
+        job_run.content_index = current_index
         job_run.stats = {
             'total_items_found': len(all_items),
             'items_created': items_created,
@@ -226,6 +257,7 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
             'blocked_urls': blocked_urls,
             'agent_errors': agent_errors,
             'destinations': delivery_results,
+            'change': change,
         }
         job_run.save()
 
@@ -243,6 +275,18 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
             job.next_run_at = calculate_next_run_time(job.schedule_config)
 
         job.save()
+
+        # Fire change alerts when the content actually changed and the job opts in.
+        # Never let a notification failure fail the run — record the outcome instead.
+        if run_succeeded and job.notify_on_change and change.get('changed'):
+            try:
+                from .notifications import send_change_alert
+                notify_results = send_change_alert(job, job_run, change)
+                if notify_results:
+                    job_run.stats['notifications'] = notify_results
+                    job_run.save(update_fields=['stats'])
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Change alert failed for job {job_id}: {e}")
 
         if run_succeeded:
             logger.info(
@@ -512,7 +556,7 @@ def deliver_run_to_destinations(job, job_run) -> list:
     results = []
     for dest in destinations:
         try:
-            handler = get_destination(dest.dest_type, dest.config)
+            handler = get_destination(dest.dest_type, dest.decrypted_config)
             result = handler.deliver(columns, rows)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Destination {dest.id} ({dest.dest_type}) failed: {e}", exc_info=True)
@@ -583,6 +627,105 @@ def calculate_next_run_time(schedule_config: dict):
 
     # Default: 1 hour
     return now + timedelta(hours=1)
+
+
+async def _preview_extract(url: str, prompt: str, use_js: bool, timeout: int):
+    """Single-page LLM extraction for a dry-run preview: one fetch, plan, extract.
+
+    Deliberately does NOT follow detail links or paginate — it just shows what the
+    first page yields so the user can sanity-check before committing to a full run.
+    """
+    from .engines import get_fetch_engine
+    from .engines.registry import fetch_with_fallback
+    from .agent.llm import get_llm
+    from .agent.state import ExtractionPlan, safe_field_name
+    from .agent.graph import build_row_models, _truncate, absolutize_row_urls
+
+    engine = get_fetch_engine()
+    try:
+        # Preview only samples the first page, so skip the full-page scroll for speed.
+        fr = await fetch_with_fallback(engine, url, js=use_js, timeout=timeout,
+                                       scan_full_page=False)
+        if not fr.success or fr.is_empty:
+            return [], (fr.error or 'Failed to fetch the page')
+        sample = _truncate(fr.markdown or fr.html)
+
+        planner = get_llm(role='planner').with_structured_output(ExtractionPlan)
+        plan = await planner.ainvoke(
+            "You are a web-scraping planner. Decide what columns to extract.\n\n"
+            f"USER REQUEST:\n{prompt}\n\nPAGE SAMPLE (markdown):\n{sample}\n\n"
+            "Return snake_case field names for the data the user asked for."
+        )
+        seen, names = set(), []
+        for f in plan.fields:
+            n = safe_field_name(f.name)
+            while n in seen:
+                n += "_x"
+            seen.add(n)
+            f.name = n
+            names.append(n)
+        if not names:
+            return [], 'Could not determine columns to extract'
+
+        ResultModel = build_row_models(names)
+        extractor = get_llm(role='extractor').with_structured_output(ResultModel)
+        col_desc = "\n".join(f"- {f.name}: {f.description}" for f in plan.fields)
+        result = await extractor.ainvoke(
+            "Extract structured rows from the page content below.\n\n"
+            f"USER REQUEST:\n{prompt}\n\nCOLUMNS:\n{col_desc}\n\n"
+            f"PAGE CONTENT (markdown):\n{sample}\n\n"
+            "Return up to 8 rows. Use null for missing values. Do not invent data."
+        )
+        rows = [absolutize_row_urls(r.model_dump(), url) for r in result.rows][:8]
+        return rows, None
+    finally:
+        await engine.close()
+
+
+@shared_task
+def preview_scrape_task(payload: dict) -> dict:
+    """Bounded dry run: return up to 8 sample rows for a URL+prompt (or selectors).
+
+    Persists nothing — used by the "Preview output" button so a user can see what a
+    job would extract before creating/running it.
+    """
+    urls = payload.get('urls') or ([payload['url']] if payload.get('url') else [])
+    urls = [u for u in urls if u]
+    prompt = (payload.get('prompt') or '').strip()
+    selectors = payload.get('selectors') or {}
+    use_js = bool(payload.get('use_js_rendering'))
+    timeout = settings.SCRAPER_CONFIG['DEFAULT_TIMEOUT']
+
+    if not urls:
+        return {'success': False, 'error': 'No URL provided', 'rows': [], 'columns': []}
+    url = urls[0]
+    err = None
+    try:
+        if selectors.get('fields'):
+            from .scraping_engine import SelectorTester
+            res = asyncio.run(SelectorTester.test_selectors(url, selectors, use_js))
+            rows = (res.get('items') or [])[:8] if res.get('success') else []
+            err = None if res.get('success') else res.get('error')
+        elif prompt:
+            rows, err = asyncio.run(_preview_extract(url, prompt, use_js, timeout))
+        else:
+            return {'success': False, 'error': 'Provide a prompt or selectors',
+                    'rows': [], 'columns': []}
+
+        columns, clean = [], []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            d = {k: v for k, v in r.items() if k != '_source_url'}
+            clean.append(d)
+            for k in d:
+                if k not in columns:
+                    columns.append(k)
+        return {'success': True, 'url': url, 'columns': columns,
+                'rows': clean, 'count': len(clean), 'error': err}
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Preview failed for {url}: {e}", exc_info=True)
+        return {'success': False, 'error': str(e), 'rows': [], 'columns': []}
 
 
 @shared_task

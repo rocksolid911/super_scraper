@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import TopBar from '@/components/TopBar';
-import { listJobs, createJob, getToken, Job, ApiError } from '@/lib/api';
+import PreviewOutput from '@/components/PreviewOutput';
+import { listJobs, createJob, getToken, parsePages, Job, ApiError } from '@/lib/api';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -17,6 +18,7 @@ export default function Dashboard() {
   const [prompt, setPrompt] = useState('');
   const [js, setJs] = useState(false);
   const [respectRobots, setRespectRobots] = useState(true);
+  const [pages, setPages] = useState('1');
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -53,6 +55,7 @@ export default function Dashboard() {
         configuration,
         use_js_rendering: js,
         respect_robots_txt: respectRobots,
+        max_pages: parsePages(pages),
       });
       router.push(`/jobs/${job.id}`);
     } catch (err) {
@@ -69,9 +72,20 @@ export default function Dashboard() {
       <div className="container">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h1 style={{ margin: 0 }}>New scrape job</h1>
-          <button className="secondary" onClick={() => router.push('/visual')}>
-            🖱 Visual selector
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="secondary" onClick={() => router.push('/discover')}>
+              🧭 Discover
+            </button>
+            <button className="secondary" onClick={() => router.push('/monitor')}>
+              🔔 Monitor
+            </button>
+            <button className="secondary" onClick={() => router.push('/recipes')}>
+              📑 Recipes
+            </button>
+            <button className="secondary" onClick={() => router.push('/visual')}>
+              🖱 Visual selector
+            </button>
+          </div>
         </div>
         <p className="notice" style={{ margin: '6px 0 16px' }}>
           Describe what you want in natural language below, or use the visual selector to click fields on a live page.
@@ -101,6 +115,24 @@ export default function Dashboard() {
               <input type="checkbox" checked={respectRobots} onChange={(e) => setRespectRobots(e.target.checked)} style={{ width: 'auto' }} />
               <span>Respect robots.txt (uncheck only if you have permission to scrape the site)</span>
             </label>
+
+            <label style={{ marginTop: 12 }}>Pages to scrape</label>
+            <input
+              value={pages}
+              onChange={(e) => setPages(e.target.value)}
+              placeholder='1, 2, 3… or "all"'
+              style={{ maxWidth: 220 }}
+            />
+            <span className="muted" style={{ fontSize: 12 }}>
+              Number of pages to follow (auto-detects “next”). Use “all” to follow every page.
+            </span>
+
+            <PreviewOutput
+              storageKey="dashboard"
+              urls={urls.split(/[\n,]+/).map((u) => u.trim()).filter(Boolean)}
+              prompt={prompt}
+              useJs={js}
+            />
 
             {error && <div className="error">{error}</div>}
             <div style={{ marginTop: 16 }}>

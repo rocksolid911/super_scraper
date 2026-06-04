@@ -43,6 +43,7 @@ class FirecrawlEngine(BaseEngine):
         js: bool = True,
         timeout: int = 30,
         wait_for: Optional[str] = None,
+        scan_full_page: bool = True,  # accepted for interface parity; Firecrawl handles this itself
     ) -> FetchResult:
         import asyncio
 

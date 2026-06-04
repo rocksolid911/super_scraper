@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, Type
 from urllib.parse import urljoin
 
@@ -36,9 +37,34 @@ logger = logging.getLogger(__name__)
 
 MAX_MARKDOWN_CHARS = 18000
 
+_ANGLE_URL_RE = re.compile(r'<([^>\s]+)>')
+
 
 def _truncate(text: str, limit: int = MAX_MARKDOWN_CHARS) -> str:
     return text if len(text) <= limit else text[:limit] + "\n... (truncated)"
+
+
+def clean_url_value(value: str, base_url: str) -> str:
+    """Normalise a URL the LLM lifted from markdown into an absolute, unwrapped URL.
+
+    Handles the two generic failure modes of LLM link extraction: markdown autolink
+    wrapping (``<...>``) and relative hrefs. Non-URL strings pass through unchanged.
+    """
+    v = value.strip()
+    m = _ANGLE_URL_RE.search(v)
+    if m and '/' in m.group(1):  # e.g. "https://site/x/</x/page.php?id=1>"
+        return urljoin(base_url, m.group(1))
+    if v.startswith('/') and ' ' not in v:  # bare relative path
+        return urljoin(base_url, v)
+    return value
+
+
+def absolutize_row_urls(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
+    """Clean any URL-shaped string values in an extracted row (see clean_url_value)."""
+    return {
+        k: (clean_url_value(v, base_url) if isinstance(v, str) else v)
+        for k, v in row.items()
+    }
 
 
 def build_row_models(field_names: List[str]) -> Type[BaseModel]:
@@ -145,7 +171,7 @@ async def harvest_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
                     "Return every matching row. Use null for missing values. Do not invent data."
                 )
                 result = await llm.ainvoke(ext_prompt)
-                new = [r.model_dump() for r in result.rows]
+                new = [absolutize_row_urls(r.model_dump(), url) for r in result.rows]
                 for row in new:
                     row['_source_url'] = url
                 rows.extend(new)

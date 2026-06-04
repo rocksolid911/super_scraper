@@ -3,7 +3,9 @@ Scraper serializers.
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
+from .models import (
+    ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination, ScrapeRecipe,
+)
 
 User = get_user_model()
 
@@ -25,6 +27,7 @@ class JobRunSerializer(serializers.ModelSerializer):
     """Serializer for job runs."""
     is_completed = serializers.ReadOnlyField()
     is_running = serializers.ReadOnlyField()
+    change_summary = serializers.ReadOnlyField()
     items_preview = ScrapedItemSerializer(
         source='items',
         many=True,
@@ -37,7 +40,7 @@ class JobRunSerializer(serializers.ModelSerializer):
             'id', 'job', 'status', 'started_at', 'finished_at',
             'duration_seconds', 'items_scraped', 'pages_visited',
             'errors_count', 'error_message', 'stats', 'task_id',
-            'is_completed', 'is_running', 'created_at', 'items_preview'
+            'is_completed', 'is_running', 'change_summary', 'created_at', 'items_preview'
         ]
         read_only_fields = [
             'id', 'started_at', 'finished_at', 'duration_seconds',
@@ -50,13 +53,14 @@ class JobRunListSerializer(serializers.ModelSerializer):
     """Serializer for job runs list (without items)."""
     is_completed = serializers.ReadOnlyField()
     is_running = serializers.ReadOnlyField()
+    change_summary = serializers.ReadOnlyField()
 
     class Meta:
         model = JobRun
         fields = [
             'id', 'job', 'status', 'started_at', 'finished_at',
             'duration_seconds', 'items_scraped', 'pages_visited',
-            'errors_count', 'is_completed', 'is_running', 'created_at'
+            'errors_count', 'is_completed', 'is_running', 'change_summary', 'created_at'
         ]
         read_only_fields = fields
 
@@ -82,7 +86,8 @@ class ScrapeJobSerializer(serializers.ModelSerializer):
             'next_run_at', 'last_run_at', 'total_runs', 'successful_runs',
             'failed_runs', 'total_items_scraped', 'success_rate',
             'respect_robots_txt', 'use_js_rendering', 'max_pages',
-            'max_depth', 'rate_limit', 'urls', 'selectors', 'schema',
+            'max_depth', 'rate_limit', 'notify_on_change', 'notify_config',
+            'urls', 'selectors', 'schema',
             'created_at', 'updated_at', 'recent_runs'
         ]
         read_only_fields = [
@@ -121,7 +126,8 @@ class CreateScrapeJobSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'mode', 'status', 'configuration',
             'respect_robots_txt', 'use_js_rendering',
-            'max_pages', 'max_depth', 'rate_limit'
+            'max_pages', 'max_depth', 'rate_limit',
+            'notify_on_change', 'notify_config'
         ]
         read_only_fields = ['id', 'status']
 
@@ -256,11 +262,25 @@ class DataDestinationSerializer(serializers.ModelSerializer):
             'total_rows_delivered', 'created_at', 'updated_at'
         ]
 
+    def to_representation(self, instance):
+        # Return decrypted secrets to the owner so the edit UI shows real values;
+        # at rest in the DB they remain encrypted.
+        data = super().to_representation(instance)
+        data['config'] = instance.decrypted_config
+        return data
+
     def validate(self, attrs):
         # Validate the destination config eagerly so misconfig is caught at save time.
+        # On a partial update the incoming config may be absent — fall back to the
+        # instance's *decrypted* config so validation sees real values, not ciphertext.
         from .destinations import get_destination
         dest_type = attrs.get('dest_type', getattr(self.instance, 'dest_type', None))
-        config = attrs.get('config', getattr(self.instance, 'config', {}))
+        if 'config' in attrs:
+            config = attrs['config']
+        elif self.instance is not None:
+            config = self.instance.decrypted_config
+        else:
+            config = {}
         try:
             get_destination(dest_type, config).validate()
         except ValueError as e:
@@ -272,6 +292,30 @@ class DataDestinationSerializer(serializers.ModelSerializer):
         if request and job.user_id != request.user.id:
             raise serializers.ValidationError("You do not own this job.")
         return job
+
+
+class DiscoverRequestSerializer(serializers.Serializer):
+    """Request to map a site's sections or list a section's entries."""
+    url = serializers.URLField()
+    use_js_rendering = serializers.BooleanField(default=False)
+
+
+class ScrapeRecipeSerializer(serializers.ModelSerializer):
+    """Serializer for a saved discovery selection (recipe)."""
+    item_urls = serializers.ReadOnlyField()
+
+    class Meta:
+        model = ScrapeRecipe
+        fields = [
+            'id', 'name', 'source_url', 'section_label', 'prompt',
+            'items', 'selectors', 'use_js_rendering', 'respect_robots_txt',
+            'item_urls', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'item_urls', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        validated_data['user'] = self.context['request'].user
+        return super().create(validated_data)
 
 
 class WebsiteDomainSerializer(serializers.ModelSerializer):

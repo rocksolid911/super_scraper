@@ -87,8 +87,13 @@ class BaseEngine(ABC):
         js: bool = True,
         timeout: int = 30,
         wait_for: Optional[str] = None,
+        scan_full_page: bool = True,
     ) -> FetchResult:
-        """Render a URL and return its HTML + markdown."""
+        """Render a URL and return its HTML + markdown.
+
+        ``scan_full_page`` auto-scrolls to trigger lazy/infinite-scroll content;
+        engines that don't support it may ignore it.
+        """
         raise NotImplementedError
 
     @abstractmethod
