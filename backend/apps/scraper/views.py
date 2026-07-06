@@ -252,23 +252,37 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
 
     def _export_csv(self, job, items):
         """Export items as CSV."""
+        from apps.core.utils import sanitize_filename
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = (
-            f'attachment; filename="{job.name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+            f'attachment; filename="{sanitize_filename(job.name)}_'
+            f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
         )
 
         if not items.exists():
             return response
 
-        # Get all field names from items
+        # Collect field names from *all* items — sampling would make DictWriter
+        # raise on any later item that introduces a new key.
         field_names = set()
-        for item in items[:100]:  # Sample first 100 items for fields
-            field_names.update(item.data.keys())
+        for data in items.values_list('data', flat=True).iterator():
+            field_names.update((data or {}).keys())
 
         field_names = sorted(field_names)
 
-        writer = csv.DictWriter(response, fieldnames=['id', 'created_at', 'source_url'] + field_names)
+        writer = csv.DictWriter(
+            response,
+            fieldnames=['id', 'created_at', 'source_url'] + field_names,
+            extrasaction='ignore',
+        )
         writer.writeheader()
+
+        def _escape(value):
+            # Formula-injection guard: Excel/Sheets execute cells starting with
+            # = + - @ when the file is opened; prefix them so they stay text.
+            if isinstance(value, str) and value[:1] in ('=', '+', '-', '@'):
+                return "'" + value
+            return value
 
         for item in items:
             row = {
@@ -276,16 +290,18 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
                 'created_at': item.created_at.isoformat(),
                 'source_url': item.source_url
             }
-            row.update(item.data)
+            row.update({k: _escape(v) for k, v in item.data.items()})
             writer.writerow(row)
 
         return response
 
     def _export_json(self, job, items):
         """Export items as JSON."""
+        from apps.core.utils import sanitize_filename
         response = HttpResponse(content_type='application/json')
         response['Content-Disposition'] = (
-            f'attachment; filename="{job.name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json"'
+            f'attachment; filename="{sanitize_filename(job.name)}_'
+            f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.json"'
         )
 
         data = {
@@ -350,8 +366,10 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
             output.read(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
+        from apps.core.utils import sanitize_filename
         response['Content-Disposition'] = (
-            f'attachment; filename="{job.name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
+            f'attachment; filename="{sanitize_filename(job.name)}_'
+            f'{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
         )
 
         return response
@@ -384,17 +402,19 @@ class ScrapeJobViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def statistics(self, request):
         """Get overall statistics for user's jobs."""
+        from django.db.models import Sum
         jobs = self.get_queryset()
 
-        stats = {
-            'total_jobs': jobs.count(),
-            'active_jobs': jobs.filter(status=ScrapeJob.Status.ACTIVE).count(),
-            'scheduled_jobs': jobs.filter(is_scheduled=True).count(),
-            'total_runs': sum(job.total_runs for job in jobs),
-            'successful_runs': sum(job.successful_runs for job in jobs),
-            'failed_runs': sum(job.failed_runs for job in jobs),
-            'total_items_scraped': sum(job.total_items_scraped for job in jobs),
-        }
+        totals = jobs.aggregate(
+            total_jobs=Count('id'),
+            active_jobs=Count('id', filter=Q(status=ScrapeJob.Status.ACTIVE)),
+            scheduled_jobs=Count('id', filter=Q(is_scheduled=True)),
+            total_runs=Sum('total_runs'),
+            successful_runs=Sum('successful_runs'),
+            failed_runs=Sum('failed_runs'),
+            total_items_scraped=Sum('total_items_scraped'),
+        )
+        stats = {k: v or 0 for k, v in totals.items()}
 
         return Response(stats)
 
@@ -409,6 +429,12 @@ class JobRunViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['status', 'job']
     ordering_fields = ['created_at', 'started_at', 'finished_at']
     ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        # The list would otherwise embed an items preview for every run.
+        if self.action == 'list':
+            return JobRunListSerializer
+        return JobRunSerializer
 
     def get_queryset(self):
         """Return runs for current user's jobs only."""

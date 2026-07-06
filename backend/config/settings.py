@@ -219,7 +219,9 @@ FIRECRAWL_API_KEY = os.getenv('FIRECRAWL_API_KEY', '')
 # (AI_PLANNER_MODEL) while extraction stays on the cheap default to minimize cost.
 DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL') or 'gemini-2.5-flash-lite'
 AI_PLANNER_MODEL = os.getenv('AI_PLANNER_MODEL') or DEFAULT_AI_MODEL
-AI_TEMPERATURE = float(os.getenv('AI_TEMPERATURE', '0.7'))
+# Temperature 0: planning and extraction are deterministic tasks — stable columns
+# across runs and reproducible rows for CSS-schema verification.
+AI_TEMPERATURE = float(os.getenv('AI_TEMPERATURE', '0'))
 AI_MAX_TOKENS = int(os.getenv('AI_MAX_TOKENS', '4096'))
 
 # Logging Configuration

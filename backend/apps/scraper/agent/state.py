@@ -60,9 +60,10 @@ class ScrapeState(TypedDict, total=False):
     timeout: int
 
     # Working state
-    urls_to_visit: List[str]
+    urls_to_visit: List[Dict[str, str]]  # {'url': ..., 'role': 'index'|'content'}
     visited: List[str]
     plan: Optional[Dict[str, Any]]      # serialized ExtractionPlan
+    page_cache: Dict[str, Any]          # url -> FetchResult already fetched by the planner
     rows: List[Dict[str, Any]]
     steps: int
     errors: List[str]

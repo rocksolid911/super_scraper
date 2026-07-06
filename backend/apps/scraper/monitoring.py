@@ -78,11 +78,15 @@ def diff_indexes(current: Dict[str, Any], previous: Optional[Dict[str, Any]]) ->
             'first_run': True, 'changed': False,
             'added': len(cur), 'removed': 0, 'unchanged': 0,
             'added_sample': [], 'removed_sample': [],
+            'truncated': bool(current.get('truncated')),
         }
     prv = set(previous.get('hashes', []))
     prv_prev = previous.get('previews', {})
     added = cur - prv
     removed = prv - cur
+    # If either index hit the hash cap, rows beyond it were never tracked — the
+    # counts are approximate and "removed" rows may just have fallen off the cap.
+    truncated = bool(current.get('truncated') or previous.get('truncated'))
     return {
         'first_run': False,
         'changed': bool(added or removed),
@@ -91,6 +95,7 @@ def diff_indexes(current: Dict[str, Any], previous: Optional[Dict[str, Any]]) ->
         'unchanged': len(cur & prv),
         'added_sample': [cur_prev[h] for h in added if h in cur_prev][:_SAMPLE],
         'removed_sample': [prv_prev[h] for h in removed if h in prv_prev][:_SAMPLE],
+        'truncated': truncated,
     }
 
 

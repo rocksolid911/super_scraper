@@ -54,6 +54,13 @@ class PostgresDestination(BaseDestination):
                     "CREATE TABLE IF NOT EXISTS {} (_id BIGSERIAL PRIMARY KEY, {})"
                 ).format(table_ident, cols_ddl))
 
+                # The table may predate columns that later runs discovered —
+                # without this every INSERT fails once the schema grows.
+                for c in columns:
+                    cur.execute(sql.SQL(
+                        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT"
+                    ).format(table_ident, sql.Identifier(c)))
+
                 insert = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
                     table_ident,
                     sql.SQL(', ').join(col_idents),

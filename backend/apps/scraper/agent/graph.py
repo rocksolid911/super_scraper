@@ -75,16 +75,45 @@ def build_row_models(field_names: List[str]) -> Type[BaseModel]:
     return ResultModel
 
 
+def _discover_next_url(html: str, current_url: str) -> Optional[str]:
+    """Find the next-page URL of a paginated list (rel=next, "next" anchors,
+    page-param increment) — same heuristics the CSS path uses."""
+    from ..scraping_engine import ScrapingEngine
+    try:
+        return ScrapingEngine().discover_next_url(html, current_url)
+    except Exception as e:  # noqa: BLE001 - pagination is best-effort
+        logger.warning(f"[agent] next-page discovery failed on {current_url}: {e}")
+        return None
+
+
 # --------------------------------------------------------------------------- nodes
 
 
 async def plan_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
     start_urls = state['start_urls']
     first_md = ""
-    if start_urls:
-        fr = await fetch_with_fallback(engine, start_urls[0], js=state.get('js', True),
+    page_cache: Dict[str, Any] = {}
+    errors: List[str] = []
+    for u in start_urls:
+        fr = await fetch_with_fallback(engine, u, js=state.get('js', True),
                                        timeout=state.get('timeout', 30))
-        first_md = _truncate(fr.markdown or fr.html)
+        if fr.success and not fr.is_empty:
+            first_md = _truncate(fr.markdown or fr.html)
+            page_cache[u] = fr  # harvest reuses this instead of re-fetching
+            break
+        errors.append(f"fetch failed: {u}: {fr.error}")
+
+    if not first_md:
+        # Nothing fetched — planning on an empty sample would only hallucinate
+        # columns and waste an LLM call. End the run with the fetch errors.
+        return {
+            'plan': {},
+            'urls_to_visit': [],
+            'visited': [],
+            'rows': [],
+            'steps': 0,
+            'errors': errors or ['no start URLs provided'],
+        }
 
     llm = get_llm(role='planner').with_structured_output(ExtractionPlan)
     prompt = (
@@ -111,9 +140,10 @@ async def plan_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
         'plan': plan.model_dump(),
         'urls_to_visit': [{'url': u, 'role': role} for u in start_urls],
         'visited': [],
+        'page_cache': page_cache,
         'rows': [],
         'steps': 0,
-        'errors': [],
+        'errors': errors,
     }
 
 
@@ -124,6 +154,9 @@ async def harvest_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
     errors = list(state.get('errors', []))
     plan = state['plan']
     max_items = state.get('max_items', plan.get('max_items', 200))
+
+    if not queue:  # the planner may bail without enqueueing anything
+        return {'urls_to_visit': queue}
 
     entry = queue.pop(0)
     url, role = entry['url'], entry['role']
@@ -154,8 +187,12 @@ async def harvest_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
                     enqueued += 1
             logger.info(f"[agent] index {url}: enqueued {enqueued} detail pages")
         else:
-            fr = await fetch_with_fallback(engine, url, js=state.get('js', True),
-                                           timeout=state.get('timeout', 30))
+            # The planner already fetched the first page — reuse its result
+            # instead of paying a second (possibly minute-long) fetch.
+            fr = (state.get('page_cache') or {}).get(url)
+            if fr is None:
+                fr = await fetch_with_fallback(engine, url, js=state.get('js', True),
+                                               timeout=state.get('timeout', 30))
             if not fr.success or fr.is_empty:
                 errors.append(f"fetch failed: {url}: {fr.error}")
             else:
@@ -174,8 +211,27 @@ async def harvest_node(state: ScrapeState, *, engine) -> Dict[str, Any]:
                 new = [absolutize_row_urls(r.model_dump(), url) for r in result.rows]
                 for row in new:
                     row['_source_url'] = url
+
+                def _row_key(r):
+                    return tuple(sorted(
+                        (k, v) for k, v in r.items() if k != '_source_url'
+                    ))
+                seen_keys = {_row_key(r) for r in rows}
+                fresh = [r for r in new if _row_key(r) not in seen_keys]
+
                 rows.extend(new)
                 logger.info(f"[agent] content {url}: +{len(new)} rows (total {len(rows)})")
+
+                # Paginate list pages: enqueue the next page while under the step
+                # budget. Only when this page yielded rows we hadn't seen — a page
+                # of repeats or an empty page means the "next" heuristic walked
+                # past the end of the real list (each page costs an LLM call).
+                if plan.get('is_list') and fresh and fr.html:
+                    next_url = _discover_next_url(fr.html, url)
+                    if (next_url and next_url not in visited
+                            and all(q['url'] != next_url for q in queue)):
+                        queue.append({'url': next_url, 'role': 'content'})
+                        logger.info(f"[agent] pagination: enqueued {next_url}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[agent] harvest error on {url}: {e}")
         errors.append(f"{url}: {e}")

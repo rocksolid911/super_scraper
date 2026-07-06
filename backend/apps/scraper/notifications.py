@@ -28,9 +28,10 @@ def build_message(job, run, change: Dict[str, Any]) -> str:
     removed = change.get('removed', 0)
     unchanged = change.get('unchanged', 0)
     where = f" Run #{run_id}." if run_id else ""
+    approx = " Counts are approximate (row cap exceeded)." if change.get('truncated') else ""
     return (
         f"[super_scraper] '{job.name}' changed: "
-        f"+{added} added, -{removed} removed ({unchanged} unchanged).{where}"
+        f"+{added} added, -{removed} removed ({unchanged} unchanged).{where}{approx}"
     )
 
 

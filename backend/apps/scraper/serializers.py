@@ -25,14 +25,17 @@ class ScrapedItemSerializer(serializers.ModelSerializer):
 
 class JobRunSerializer(serializers.ModelSerializer):
     """Serializer for job runs."""
+    ITEMS_PREVIEW_LIMIT = 20
+
     is_completed = serializers.ReadOnlyField()
     is_running = serializers.ReadOnlyField()
     change_summary = serializers.ReadOnlyField()
-    items_preview = ScrapedItemSerializer(
-        source='items',
-        many=True,
-        read_only=True
-    )
+    items_preview = serializers.SerializerMethodField()
+
+    def get_items_preview(self, run):
+        # A preview, not a dump — full data lives behind /items/?run=<id>.
+        items = run.items.all()[:self.ITEMS_PREVIEW_LIMIT]
+        return ScrapedItemSerializer(items, many=True).data
 
     class Meta:
         model = JobRun
@@ -72,11 +75,13 @@ class ScrapeJobSerializer(serializers.ModelSerializer):
     selectors = serializers.ReadOnlyField()
     schema = serializers.ReadOnlyField()
     user_email = serializers.EmailField(source='user.email', read_only=True)
-    recent_runs = JobRunListSerializer(
-        source='runs',
-        many=True,
-        read_only=True
-    )
+    recent_runs = serializers.SerializerMethodField()
+
+    def get_recent_runs(self, job):
+        # Only the latest runs — serializing a job's full run history grows
+        # without bound. Older runs are available via /runs/?job=<id>.
+        runs = job.runs.all()[:10]
+        return JobRunListSerializer(runs, many=True).data
 
     class Meta:
         model = ScrapeJob
@@ -263,21 +268,15 @@ class DataDestinationSerializer(serializers.ModelSerializer):
         ]
 
     def to_representation(self, instance):
-        # Mask decrypted secrets to the owner to prevent exposure in the API response.
-        # At rest in the DB they remain encrypted.
+        # Mask secret config values in API responses; at rest they remain encrypted.
+        # Uses crypto.SECRET_KEYS so the mask list can't drift from what's encrypted.
+        from apps.core.crypto import SECRET_KEYS
         data = super().to_representation(instance)
         config = instance.decrypted_config or {}
-        
-        # Mask sensitive keys
-        sensitive_keys = {'api_key', 'password', 'token', 'secret', 'webhook_url'}
-        masked_config = {}
-        for k, v in config.items():
-            if any(sensitive in k.lower() for sensitive in sensitive_keys) and v:
-                masked_config[k] = '********'
-            else:
-                masked_config[k] = v
-                
-        data['config'] = masked_config
+        data['config'] = {
+            k: '********' if k in SECRET_KEYS and v else v
+            for k, v in config.items()
+        }
         return data
 
     def validate(self, attrs):

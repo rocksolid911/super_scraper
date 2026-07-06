@@ -2,6 +2,7 @@
 Web scraping engine using Crawl4AI and Playwright.
 """
 import logging
+import re
 import time
 from typing import Dict, List, Any, Optional
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode
@@ -289,7 +290,9 @@ class ScrapingEngine:
         page.set_default_timeout(self.timeout * 1000)
 
         try:
-            await page.goto(url, wait_until='networkidle')
+            # domcontentloaded, not networkidle — long-polling/analytics keep slow
+            # sites (e.g. myneta) from ever going idle and the goto times out.
+            await page.goto(url, wait_until='domcontentloaded')
             # Wait for any dynamic content
             await page.wait_for_timeout(1000)
             content = await page.content()
@@ -450,7 +453,9 @@ class ScrapingEngine:
                 continue
             label = (a.get_text() or '').strip().lower()
             aria = (a.get('aria-label') or '').strip().lower()
-            if label in _NEXT_TEXTS or 'next' in aria:
+            # Word-boundary match on the aria label: a plain substring check
+            # false-matches labels like "next to the winner".
+            if label in _NEXT_TEXTS or re.search(r'\bnext\b', aria):
                 return urljoin(current_url, href)
 
         # 4. Increment a page-number query parameter.

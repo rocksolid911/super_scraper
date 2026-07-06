@@ -6,6 +6,8 @@ import logging
 from datetime import timedelta
 from django.utils import timezone
 from django.conf import settings
+from django.db import IntegrityError
+from django.db.models import F
 from celery import shared_task
 from .models import ScrapeJob, JobRun, ScrapedItem, WebsiteDomain, DataDestination
 from .scraping_engine import ScrapingEngine
@@ -178,18 +180,24 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
                 items_duplicated += 1
                 continue
 
-            # Create scraped item
-            ScrapedItem.objects.create(
-                job=job,
-                run=job_run,
-                data=item_data,
-                source_url=source_url,
-                unique_hash=unique_hash,
-                metadata={
-                    'scraped_at': timezone.now().isoformat(),
-                    'engine': engine_label
-                }
-            )
+            # Create scraped item. The exists() check above isn't atomic — an
+            # overlapping run of the same job can insert the same hash between the
+            # check and the create, so treat the unique violation as a duplicate.
+            try:
+                ScrapedItem.objects.create(
+                    job=job,
+                    run=job_run,
+                    data=item_data,
+                    source_url=source_url,
+                    unique_hash=unique_hash,
+                    metadata={
+                        'scraped_at': timezone.now().isoformat(),
+                        'engine': engine_label
+                    }
+                )
+            except IntegrityError:
+                items_duplicated += 1
+                continue
             items_created += 1
 
         # Push this run's new items to any configured external destinations.
@@ -261,20 +269,20 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
         }
         job_run.save()
 
-        # Update job statistics
-        job.total_runs += 1
+        # Update job statistics with F() expressions on a filtered update so
+        # concurrent runs can't lose increments and unrelated fields (e.g. a
+        # configuration edited mid-run) can't be clobbered by a stale save.
+        job_updates = {
+            'total_runs': F('total_runs') + 1,
+            'total_items_scraped': F('total_items_scraped') + items_created,
+            'last_run_at': finished_at,
+            'updated_at': timezone.now(),
+        }
         if run_succeeded:
-            job.successful_runs += 1
+            job_updates['successful_runs'] = F('successful_runs') + 1
         else:
-            job.failed_runs += 1
-        job.total_items_scraped += items_created
-        job.last_run_at = finished_at
-
-        # Update next run time if scheduled
-        if job.is_scheduled:
-            job.next_run_at = calculate_next_run_time(job.schedule_config)
-
-        job.save()
+            job_updates['failed_runs'] = F('failed_runs') + 1
+        ScrapeJob.objects.filter(id=job.id).update(**job_updates)
 
         # Fire change alerts when the content actually changed and the job opts in.
         # Never let a notification failure fail the run — record the outcome instead.
@@ -318,14 +326,18 @@ def execute_scrape_job(self, job_id: int, run_id: int = None) -> dict:
         ).total_seconds()
         job_run.save()
 
-        # Update job statistics
-        job.total_runs += 1
-        job.failed_runs += 1
-        job.last_run_at = timezone.now()
-        job.save()
-
-        # Retry if not max retries
-        if self.request.retries < self.max_retries:
+        # Retry if not max retries. Job counters are only bumped in terminal
+        # states — a run that fails twice then succeeds counts as one run, not
+        # three — and use F() so they can't be clobbered by a stale instance.
+        will_retry = self.request.retries < self.max_retries
+        if not will_retry:
+            ScrapeJob.objects.filter(id=job.id).update(
+                total_runs=F('total_runs') + 1,
+                failed_runs=F('failed_runs') + 1,
+                last_run_at=timezone.now(),
+                updated_at=timezone.now(),
+            )
+        if will_retry:
             raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
 
         return {
@@ -345,13 +357,15 @@ def check_scheduled_jobs():
 
     now = timezone.now()
 
-    # Find jobs that are due to run
-    jobs = ScrapeJob.objects.filter(
+    # Find jobs that are due to run. Materialize before dispatching — mutating
+    # next_run_at below changes what the lazy queryset matches, so a later
+    # .count() would (usually) report 0.
+    jobs = list(ScrapeJob.objects.filter(
         is_scheduled=True,
         status=ScrapeJob.Status.ACTIVE,
         next_run_at__lte=now,
         deleted_at__isnull=True
-    )
+    ))
 
     for job in jobs:
         logger.info(f"Scheduling job: {job.name} (ID: {job.id})")
@@ -359,13 +373,15 @@ def check_scheduled_jobs():
         # Execute job asynchronously
         execute_scrape_job.delay(job.id)
 
-        # Update next run time
+        # Dispatch is the single owner of next_run_at: advancing it here (not at
+        # run completion) keeps hourly jobs from drifting by run duration, and
+        # manual runs from reshuffling the schedule.
         job.next_run_at = calculate_next_run_time(job.schedule_config)
         job.save(update_fields=['next_run_at'])
 
-    logger.info(f"Scheduled {jobs.count()} jobs for execution")
+    logger.info(f"Scheduled {len(jobs)} jobs for execution")
 
-    return {'jobs_scheduled': jobs.count()}
+    return {'jobs_scheduled': len(jobs)}
 
 
 @shared_task
@@ -444,34 +460,34 @@ def generate_ai_schema_task(
     from .ai_schema_generator import AISchemaGenerator
     from .scraping_engine import ScrapingEngine
 
-    try:
-        # Fetch HTML samples
+    # Everything runs inside one event loop: a browser started under one
+    # asyncio.run() can't be reused (or closed) under another.
+    async def _generate():
         engine = ScrapingEngine(
             use_js_rendering=use_js_rendering,
             respect_robots_txt=False
         )
+        try:
+            html_samples = []
+            for url in urls[:3]:  # Limit to 3 URLs for analysis
+                html = await engine.fetch_page(url)
+                if html:
+                    html_samples.append(html)
 
-        html_samples = []
-        for url in urls[:3]:  # Limit to 3 URLs for analysis
-            html = asyncio.run(engine.fetch_page(url))
-            if html:
-                html_samples.append(html)
+            if not html_samples:
+                return {
+                    'success': False,
+                    'error': 'Failed to fetch any URLs',
+                    'schema': {}
+                }
 
-        if not html_samples:
-            return {
-                'success': False,
-                'error': 'Failed to fetch any URLs',
-                'schema': {}
-            }
+            generator = AISchemaGenerator()
+            return await generator.generate_schema(html_samples, scrape_prompt)
+        finally:
+            await engine.close_browser()
 
-        # Generate schema with AI
-        generator = AISchemaGenerator()
-        result = asyncio.run(
-            generator.generate_schema(html_samples, scrape_prompt)
-        )
-
-        return result
-
+    try:
+        return asyncio.run(_generate())
     except Exception as e:
         logger.error(f"AI schema generation failed: {e}", exc_info=True)
         return {
@@ -479,8 +495,6 @@ def generate_ai_schema_task(
             'error': str(e),
             'schema': {}
         }
-    finally:
-        asyncio.run(engine.close_browser())
 
 
 def _maybe_cache_css_schema(job, agent_out, urls, use_js, timeout):
@@ -493,6 +507,9 @@ def _maybe_cache_css_schema(job, agent_out, urls, use_js, timeout):
 
     plan = agent_out.get('plan') or {}
     rows = agent_out.get('rows') or []
+    # The agent may have paginated; the CSS verification below only fetches the
+    # first page, so only compare against the rows that came from it.
+    first_page_rows = [r for r in rows if r.get('_source_url') == urls[0]] or rows
 
     # Only single-page lists are safely reproducible with static CSS (detail-link
     # following needs the agent's navigation).
@@ -518,7 +535,7 @@ def _maybe_cache_css_schema(job, agent_out, urls, use_js, timeout):
         SelectorTester.test_selectors(urls[0], candidate, use_js_rendering=use_js)
     )
     found = result.get('total_found', 0) if result.get('success') else 0
-    if found >= max(1, int(0.6 * len(rows))):
+    if found >= max(1, int(0.6 * len(first_page_rows))):
         job.configuration['selectors'] = candidate
         job.configuration['css_cached'] = True
         job.save(update_fields=['configuration', 'updated_at'])
