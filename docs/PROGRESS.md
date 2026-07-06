@@ -21,7 +21,8 @@ CSV/Excel/JSON, an external Postgres, Google Sheets, or webhooks, and can run on
 | Scheduling | ✅ UI + API verified | beat loop runs every 5 min (not long-run tested) |
 | **On-site Discovery** | ✅ Done & verified | sections + entries + preview; recipe save |
 | **Monitoring (change detection + alerts)** | ✅ Done & verified | diff, webhook alert, run history UI |
-| **Output preview (dry run)** | ✅ Done & verified | pre-run sample, state persists across navigation |
+| Output preview (dry run) | ✅ Done & verified | pre-run sample, state persists across navigation |
+| User Retention Features | 🔄 In Progress | API secrets masked, docs updated, recipes seeded |
 | Deployment / PR | ⏳ Not pushed | local commits only |
 
 ---
@@ -196,6 +197,21 @@ navigates away while the preview is in flight.
 
 **Verified:** preview on books.toscrape.com → 8 rows, correct columns, book detail links resolved
 to absolute URLs; preview task dispatches as 202; `task-status` poll cycle confirmed.
+
+---
+
+### Phase 11 — User Retention & Security Fixes (In Progress) 🔄
+
+#### What it does
+Improves the security of the API by masking destination secrets and sets the foundation for user retention features like community recipes, conversational refinement, and scrape digests.
+
+#### Changed files
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/serializers.py` | `DataDestinationSerializer` masks sensitive config keys (`api_key`, `password`, `token`, `webhook_url`) in API responses and properly restores them on update. |
+| `backend/apps/scraper/management/commands/seed_recipes.py` | New command to seed popular community recipes (Amazon, YC, HN) for faster onboarding. |
+| `README.md` | Updated to reflect the Next.js / Gemini stack. |
+| `docs/cost_estimation.md` | New document detailing LLM costs per feature turn. |
 
 ---
 

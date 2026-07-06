@@ -16,8 +16,9 @@ A powerful, AI-driven web scraping platform that can crawl and extract data from
 - **Rate Limiting** - Per-domain request throttling
 - **Data Export** - CSV, JSON, and Excel formats
 
-### Frontend (Flutter Web)
-- **Material Design 3** - Modern, beautiful UI
+### Frontend (Next.js)
+- **Next.js App Router** - Modern, server-rendered React framework
+- **TypeScript** - Strongly typed for reliability
 - **Visual Selector Mode** - Click-to-select fields from live website preview
 - **AI Prompt Mode** - Describe what you want in natural language
 - **Job Scheduling** - Hourly, daily, weekly, or custom CRON expressions
@@ -35,8 +36,8 @@ A powerful, AI-driven web scraping platform that can crawl and extract data from
 - Node.js (for Playwright)
 
 ### Frontend
-- Flutter 3.0+
-- Dart 3.0+
+- Node.js 18+
+- npm or yarn
 - Chrome browser
 
 ### AI Features (Optional)
@@ -112,7 +113,7 @@ See detailed installation instructions in:
 ## 🏗️ Architecture
 
 ```
-Flutter Web → Django REST API → PostgreSQL
+Next.js (React) → Django REST API → PostgreSQL
                 ↓
             Celery (Redis)
                 ↓
@@ -129,8 +130,9 @@ super_scraper/
 │   ├── config/            # Settings
 │   ├── apps/              # Django apps
 │   └── README.md
-├── frontend/              # Flutter web
-│   ├── lib/               # Dart code
+├── frontend/              # Next.js web application
+│   ├── app/               # Next.js App Router pages
+│   ├── components/        # React components
 │   └── README.md
 ├── docker-compose.yml
 └── README.md
@@ -150,4 +152,4 @@ Contributions welcome! Please read the component READMEs for guidelines.
 
 ---
 
-Built with Django, Flutter, Crawl4AI, and AI
+Built with Django, Next.js, Crawl4AI, and AI

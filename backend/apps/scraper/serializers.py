@@ -263,10 +263,21 @@ class DataDestinationSerializer(serializers.ModelSerializer):
         ]
 
     def to_representation(self, instance):
-        # Return decrypted secrets to the owner so the edit UI shows real values;
-        # at rest in the DB they remain encrypted.
+        # Mask decrypted secrets to the owner to prevent exposure in the API response.
+        # At rest in the DB they remain encrypted.
         data = super().to_representation(instance)
-        data['config'] = instance.decrypted_config
+        config = instance.decrypted_config or {}
+        
+        # Mask sensitive keys
+        sensitive_keys = {'api_key', 'password', 'token', 'secret', 'webhook_url'}
+        masked_config = {}
+        for k, v in config.items():
+            if any(sensitive in k.lower() for sensitive in sensitive_keys) and v:
+                masked_config[k] = '********'
+            else:
+                masked_config[k] = v
+                
+        data['config'] = masked_config
         return data
 
     def validate(self, attrs):
@@ -277,6 +288,12 @@ class DataDestinationSerializer(serializers.ModelSerializer):
         dest_type = attrs.get('dest_type', getattr(self.instance, 'dest_type', None))
         if 'config' in attrs:
             config = attrs['config']
+            # Restore masked values if they weren't changed
+            if self.instance is not None:
+                existing = self.instance.decrypted_config or {}
+                for k, v in list(config.items()):
+                    if v == '********' and k in existing:
+                        config[k] = existing[k]
         elif self.instance is not None:
             config = self.instance.decrypted_config
         else:
