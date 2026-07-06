@@ -215,6 +215,51 @@ Improves the security of the API by masking destination secrets and sets the fou
 
 ---
 
+### Phase 12 — Code-review fixes (branch `feature/code-review-fixes`) ✅
+
+Implements `docs/improvement_plan.md` (full-codebase review, 2026-07-06). Phases below
+refer to that plan.
+
+#### Plan Phase 1 — secrets masking finished
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/serializers.py` | `DataDestinationSerializer.to_representation` masks via `apps.core.crypto.SECRET_KEYS` (the ad-hoc set missed `dsn`, `credentials`, and the webhook `url`); masked round-trip on PATCH kept. |
+| `backend/apps/scraper/tests/test_destinations.py` | First test module: masking on create/detail/list, masked-PATCH round-trip preserves stored secrets, new secret overwrites. |
+
+#### Plan Phase 2 — correctness bugs
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/tasks.py` | Job counters only bumped in terminal states (a retried run no longer counts 2–3×), via `F()` expressions on a filtered `.update()` so a mid-run config edit can't be clobbered. Item save catches `IntegrityError` as a duplicate (overlapping runs raced the `.exists()` check). `generate_ai_schema_task` rewritten under a single `asyncio.run()` (browser died crossing event loops; `finally` could hit `NameError`). |
+| `backend/apps/scraper/views.py` | `_export_csv` computes fieldnames over **all** items (`DictWriter` raised on late new keys) + `extrasaction='ignore'`; `sanitize_filename(job.name)` on all three export filenames. |
+| `backend/apps/scraper/scraping_engine.py` | `_fetch_with_browser` waits for `domcontentloaded` (visual path was still on `networkidle`, which hangs on slow sites). |
+
+#### Plan Phase 3 — API payload / perf
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/serializers.py` | `items_preview` capped at 20 (was: every item of the run); `recent_runs` sliced to the last 10 (was: full history). |
+| `backend/apps/scraper/views.py` | `JobRunViewSet` uses `JobRunListSerializer` for `list`; `statistics` computed with one `.aggregate()` instead of Python sums over all rows. |
+
+#### Plan Phase 4 — NL-agent improvements
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/agent/graph.py` | **Pagination:** after a list content page yields *fresh* rows, `discover_next_url` (same heuristics as the CSS path) enqueues the next page under the step budget; repeat-only pages stop the walk (LLM-call cost guard). **Fetch reuse:** planner's `FetchResult` is stashed in `state['page_cache']` and reused by harvest (saves a duplicate fetch, up to ~1 min on slow sites). **Early bail:** if no start URL fetches, the run ends with the fetch errors instead of planning on an empty sample. |
+| `backend/apps/scraper/agent/state.py` | `page_cache` state key; `urls_to_visit` type corrected. |
+| `backend/apps/scraper/tasks.py` | `_maybe_cache_css_schema` verifies against first-page rows (agent totals may now span pages); `check_scheduled_jobs` materializes the queryset before mutating `next_run_at` (count no longer logs 0) and is the single owner of `next_run_at` — run completion no longer recomputes it, so hourly jobs don't drift and manual runs don't reshuffle the schedule. |
+| `backend/config/settings.py` | `AI_TEMPERATURE` default 0.7 → 0 (deterministic planning/extraction; stabler CSS-schema verification). Env still overrides. |
+
+#### Plan Phase 5 — hardening (subset)
+| File | Change |
+|------|--------|
+| `backend/apps/scraper/destinations/postgres.py` | `ALTER TABLE … ADD COLUMN IF NOT EXISTS` per column before insert (schema was frozen at first delivery). |
+| `backend/apps/scraper/monitoring.py` + `notifications.py` | `diff_indexes` surfaces a `truncated` flag when either index hit the 5k-hash cap; alert message says counts are approximate. |
+| `backend/apps/scraper/views.py` | CSV formula-injection escaping (`=` `+` `-` `@` cells prefixed with `'`). |
+| `backend/apps/scraper/scraping_engine.py` | "next" aria-label matched on a word boundary (no more false match on "next to …"). |
+
+Deferred from plan Phase 5: SSRF guard (single-tenant today), `WebsiteDomain` wiring,
+async-blocking-call swap, JWT storage note.
+
+---
+
 ### Phase 9 — Engine reliability fixes ✅
 
 Three generic fixes applied across the fetch/extract pipeline. None are site-specific.
